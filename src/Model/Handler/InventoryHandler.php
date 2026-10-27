@@ -10,10 +10,9 @@ declare(strict_types=1);
 namespace Hyva\InventoryOrderReservationMsi\Model\Handler;
 
 use Hyva\InventoryOrderReservation\Model\Handler\HandlerInterface;
-use Hyva\InventoryOrderReservation\Model\Handler\RepairNeededException;
+use Hyva\InventoryOrderReservation\Model\Handler\RowOutcome;
 use Hyva\InventoryOrderReservation\Model\Obligation;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
-use Magento\Framework\Exception\LocalizedException;
 use Magento\InventorySalesApi\Api\Data\ItemToSellInterfaceFactory;
 use Magento\InventorySalesApi\Api\Data\SalesChannelInterface;
 use Magento\InventorySalesApi\Api\Data\SalesChannelInterfaceFactory;
@@ -33,7 +32,8 @@ use Magento\Store\Api\WebsiteRepositoryInterface;
  * compensation that came first is on the rows already and is not placed
  * again, so a registration retried after a repair by hand ends balanced.
  * A sku reserved past what the order owes is nothing a placement can
- * fix: the order is given up on for a compensation of the surplus.
+ * fix: that row is refused for a compensation of the surplus, while the
+ * order's other rows are placed in the same run.
  */
 class InventoryHandler implements HandlerInterface
 {
@@ -51,19 +51,22 @@ class InventoryHandler implements HandlerInterface
     }
 
     /**
-     * Places what the owed skus still owe through Inventory's sales-event service; nothing when every sku is balanced.
-     * @throws LocalizedException when an obligation names no stock to read the remainder on
-     * @throws RepairNeededException when a sku is reserved past what the order owes
+     * Places what the owed skus still owe through Inventory's sales-event service, in one call, and answers for each row.
      */
-    public function register(OrderInterface $order, array $owed): void
+    public function register(OrderInterface $order, array $owed): array
     {
+        $outcomes = [];
         $items = [];
         foreach ($owed as $obligation) {
             if ($obligation->qtyOrdered <= 0) {
+                $outcomes[] = new RowOutcome($obligation, RowOutcome::BALANCED);
                 continue;
             }
             if ($obligation->stockId === null) {
-                throw new LocalizedException(__('The obligation for sku %1 names no stock to read its remainder on.', $obligation->sku));
+                $outcomes[] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: (string) __(
+                    'The website was assigned to no stock when the order was recorded; there is no stock to read the remainder on.'
+                ));
+                continue;
             }
             // what is ordered and neither canceled, refunded nor shipped,
             // less the rows already there on the stock the order was
@@ -72,20 +75,23 @@ class InventoryHandler implements HandlerInterface
             // stock of its own, as it does for the checkout
             $remaining = $this->remaining->forOrderSku($order, $obligation->sku, $obligation->stockId)['remaining'];
             if (abs($remaining) < Obligation::TOLERANCE) {
+                $outcomes[] = new RowOutcome($obligation, RowOutcome::BALANCED);
                 continue;
             }
             if ($remaining > 0) {
-                throw new RepairNeededException(__(
+                $outcomes[] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: (string) __(
                     'Sku %1 is reserved %2 past what the order owes on stock %3; nothing to place, a compensation of %2 repairs it.',
                     $obligation->sku,
                     sprintf('%+.4f', $remaining),
                     $obligation->stockId
-                ));
+                ), remainders: [$obligation->stockId => $remaining]);
+                continue;
             }
             $items[] = $this->itemFactory->create(['sku' => $obligation->sku, 'qty' => $remaining]);
+            $outcomes[] = new RowOutcome($obligation, RowOutcome::PLACED, $remaining);
         }
         if ($items === []) {
-            return;
+            return $outcomes;
         }
         $websiteId = (int) $order->getStore()->getWebsiteId();
         $websiteCode = (string) $this->websiteRepository->getById($websiteId)->getCode();
@@ -101,5 +107,6 @@ class InventoryHandler implements HandlerInterface
             'data' => ['objectIncrementId' => (string) $order->getIncrementId()],
         ]));
         $this->placeReservations->execute($items, $salesChannel, $salesEvent);
+        return $outcomes;
     }
 }

@@ -9,7 +9,6 @@ declare(strict_types=1);
 
 namespace Hyva\InventoryOrderReservationMsi\Test\Integration;
 
-use Hyva\InventoryOrderReservation\Model\ResourceModel\ObligationResource;
 use Hyva\InventoryOrderReservation\Test\Integration\StoreCase;
 use Magento\Framework\Exception\CouldNotSaveException;
 
@@ -20,9 +19,6 @@ use Magento\Framework\Exception\CouldNotSaveException;
  */
 class CompensationTransactionTest extends StoreCase
 {
-    /** Fails every update of the obligation table while it exists: the settlement, after the row went in. */
-    private const FAILING_TRIGGER = 'hyva_test_settlement_fails';
-
     public function test_a_failure_after_the_compensation_write_rolls_the_write_back_and_the_next_attempt_settles(): void
     {
         $this->requireInventory();
@@ -55,33 +51,5 @@ class CompensationTransactionTest extends StoreCase
         self::assertSame('done', $this->obligationStatus($orderId));
         self::assertSame('compensation', $this->obligations($orderId)[0]->settledBy);
         self::assertNotContains($orderId, $this->orderIdsRefused(), 'settled: no longer listed');
-    }
-
-    /**
-     * From here on every update of the obligation table fails inside the
-     * database with a signaled error, the way a lost connection or a
-     * deadlock would fail the settlement after the row is in.
-     */
-    private function failSettlements(): void
-    {
-        $this->letSettlementsPass();
-        $this->connection()->query(sprintf(
-            "CREATE TRIGGER %s BEFORE UPDATE ON %s FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'simulated failure after the compensation write'",
-            self::FAILING_TRIGGER,
-            $this->table(ObligationResource::TABLE)
-        ));
-    }
-
-    /**
-     * The trigger gone; a transaction a failure left open is rolled back
-     * first, since the store refuses DDL inside one.
-     */
-    private function letSettlementsPass(): void
-    {
-        $connection = $this->connection();
-        while ($connection->getTransactionLevel() > 0) {
-            $connection->rollBack();
-        }
-        $connection->query(sprintf('DROP TRIGGER IF EXISTS %s', self::FAILING_TRIGGER));
     }
 }

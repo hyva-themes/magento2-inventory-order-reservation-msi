@@ -93,6 +93,42 @@ class CoordinatedCompensationTest extends TestCase
         self::assertSame(1, $outcome->stockId);
     }
 
+    public function test_a_refused_row_is_judged_without_registering_the_orders_other_rows(): void
+    {
+        $registration = $this->createMock(StockRegistration::class);
+        $registration->expects(self::never())->method('registerLocked');
+        $obligations = $this->refusedRows();
+        $obligations->expects(self::once())->method('markRowDone')->with(9, 'mug', Obligation::SETTLED_BY_COMPENSATION);
+        $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 1), obligations: $obligations, registration: $registration);
+
+        $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
+
+        self::assertSame(Outcome::APPLIED, $outcome->kind);
+        self::assertFalse($outcome->registrationRan);
+    }
+
+    public function test_a_row_still_owed_after_the_registration_ran_is_refused_as_pending(): void
+    {
+        // the handler could not be built, or an Inventory module is missing: the row stays the module's
+        $owed = new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY);
+        $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 0), obligations: $this->rows($owed, null));
+
+        $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
+
+        self::assertTrue($outcome->isRefused());
+        self::assertStringContainsString('has not run', $outcome->reason);
+    }
+
+    public function test_a_registration_that_fails_reaches_the_caller_with_nothing_judged(): void
+    {
+        $registration = $this->createMock(StockRegistration::class);
+        $registration->method('registerLocked')->willThrowException(new LocalizedException(__('Some of the products are out of stock.')));
+        $service = $this->service(registrationRan: true, remaining: -1.0, writer: $this->writer(expectRows: 0), registration: $registration);
+
+        $this->expectException(LocalizedException::class);
+        $service->apply(9, $this->reservation('mug', 2, -1.0));
+    }
+
     public function test_a_sku_the_order_owes_nothing_on_is_refused(): void
     {
         $remainingService = $this->createMock(RemainingInconsistency::class);
@@ -114,7 +150,7 @@ class CoordinatedCompensationTest extends TestCase
             remaining: -1.0,
             writer: $this->writer(expectRows: 0),
             remainingService: $remainingService,
-            obligation: new Obligation(9, 'mug', 'simple', 1.0, 1, null, Obligation::MODE_LEGACY)
+            obligation: new Obligation(9, 'mug', 'simple', 1.0, 1, null, Obligation::MODE_LEGACY, Obligation::STATUS_DONE)
         );
 
         $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
@@ -127,7 +163,6 @@ class CoordinatedCompensationTest extends TestCase
     {
         $obligations = $this->refusedRows();
         $obligations->expects(self::once())->method('markRowDone')->with(9, 'mug', Obligation::SETTLED_BY_COMPENSATION);
-        $obligations->expects(self::never())->method('markDone');
         $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 1), obligations: $obligations);
 
         $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
@@ -139,7 +174,6 @@ class CoordinatedCompensationTest extends TestCase
     {
         $obligations = $this->refusedRows();
         $obligations->expects(self::never())->method('markRowDone');
-        $obligations->expects(self::never())->method('markDone');
         $service = $this->service(registrationRan: false, remaining: -3.0, writer: $this->writer(expectRows: 1), obligations: $obligations);
 
         $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
@@ -167,11 +201,45 @@ class CoordinatedCompensationTest extends TestCase
     {
         $obligations = $this->createMock(ObligationResource::class);
         $obligations->method('isOneConnection')->willReturn(false);
-        $obligations->method('forOrder')->with(9)->willReturn([new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY)]);
+        $obligations->method('forOrder')->with(9)->willReturn([
+            new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY, Obligation::STATUS_DONE),
+        ]);
         $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 0), obligations: $obligations);
 
         $this->expectException(LocalizedException::class);
         $service->apply(9, $this->reservation('mug', 2, -1.0));
+    }
+
+    /**
+     * The resource answering the row, then the row after the registration when one is given.
+     */
+    private function rows(Obligation $row, ?Obligation $afterRegistration): ObligationResource
+    {
+        $obligations = $this->createMock(ObligationResource::class);
+        $obligations->method('isOneConnection')->willReturn(true);
+        $calls = 0;
+        $obligations->method('forOrder')->with(9)->willReturnCallback(
+            static function () use ($row, $afterRegistration, &$calls): array {
+                $calls++;
+                return [$calls > 1 && $afterRegistration !== null ? $afterRegistration : $row];
+            }
+        );
+        return $obligations;
+    }
+
+    private function done(Obligation $row): Obligation
+    {
+        return new Obligation(
+            $row->orderId,
+            $row->sku,
+            $row->productType,
+            $row->qtyOrdered,
+            $row->websiteId,
+            $row->stockId,
+            $row->mode,
+            Obligation::STATUS_DONE,
+            Obligation::SETTLED_BY_REGISTRATION
+        );
     }
 
     private function refusedRows(): ObligationResource
@@ -191,12 +259,15 @@ class CoordinatedCompensationTest extends TestCase
         AppendReservationsInterface $writer,
         ?RemainingInconsistency $remainingService = null,
         ?Obligation $obligation = null,
-        ?ObligationResource $obligations = null
+        ?ObligationResource $obligations = null,
+        ?StockRegistration $registration = null
     ): CoordinatedCompensation {
         $mutex = $this->createMock(OrderMutexInterface::class);
         $mutex->method('execute')->willReturnCallback(static fn (int $orderId, callable $callable, array $args) => $callable(...$args));
-        $registration = $this->createMock(StockRegistration::class);
-        $registration->method('registerLocked')->willReturn($registrationRan);
+        if ($registration === null) {
+            $registration = $this->createMock(StockRegistration::class);
+            $registration->method('registerLocked')->willReturn($registrationRan);
+        }
         $orders = $this->createMock(OrderRepositoryInterface::class);
         $orders->method('get')->willReturn($this->createMock(OrderInterface::class));
         if ($remainingService === null) {
@@ -204,11 +275,19 @@ class CoordinatedCompensationTest extends TestCase
             $remainingService->method('forOrderSku')->willReturn(['expected' => $remaining, 'actual' => 0.0, 'remaining' => $remaining]);
         }
         if ($obligations === null) {
-            $obligations = $this->createMock(ObligationResource::class);
-            $obligations->method('isOneConnection')->willReturn(true);
-            $obligations->method('forOrder')->with(9)->willReturn([
-                $obligation ?? new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY),
-            ]);
+            // the named row is read first: owed when the registration is to
+            // run first and done after it; done from the start otherwise
+            $row = $obligation ?? new Obligation(
+                9,
+                'mug',
+                'simple',
+                1.0,
+                1,
+                2,
+                Obligation::MODE_INVENTORY,
+                $registrationRan ? Obligation::STATUS_OWED : Obligation::STATUS_DONE
+            );
+            $obligations = $this->rows($row, $registrationRan ? $this->done($row) : null);
         }
         return new CoordinatedCompensation($mutex, $registration, $orders, $remainingService, $writer, $obligations);
     }

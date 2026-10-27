@@ -10,13 +10,13 @@ declare(strict_types=1);
 namespace Hyva\InventoryOrderReservationMsi\Test\Integration;
 
 use Hyva\InventoryOrderReservation\Test\Integration\StoreCase;
-use Magento\Framework\Exception\LocalizedException;
 
 /**
  * A compensation settles the sku it balances and nothing else: an order
  * the registration gave up on with two skus stays unresolved until each
  * sku has been repaired; and a registration retried after a partial
- * repair places what is still missing, never the whole order again.
+ * repair places what is still missing, never the whole order again; a
+ * surplus is one row's refusal, the order's other rows placed in the run.
  */
 class PartialRepairTest extends StoreCase
 {
@@ -86,16 +86,11 @@ class PartialRepairTest extends StoreCase
         $this->append([$this->reservationRow($orderId, $stock, -4.0, self::SKU, 'order_placed')]);
         self::assertSame(-4.0, $this->reservationSum($orderId, $stock));
 
-        // nothing a placement can fix: given up at once, with the reason, nothing written
-        try {
-            $this->register($orderId);
-            self::fail('a surplus must be given up on');
-        } catch (LocalizedException $e) {
-            self::assertStringContainsString('reserved +1.0000 past what the order owes', $e->getMessage());
-        }
+        // nothing a placement can fix: the row is refused with the reason, no attempt counted, nothing written
+        self::assertTrue($this->register($orderId), 'the run completed; the refusal is its result');
         self::assertSame(-4.0, $this->reservationSum($orderId, $stock), 'nothing written');
-        self::assertSame('refused', $this->obligationStatus($orderId), 'given up at once, not after the attempt limit');
-        self::assertSame(1, $this->obligationAttempts($orderId));
+        self::assertSame('refused', $this->obligationStatus($orderId), 'refused at once, not after the attempt limit');
+        self::assertSame(0, $this->obligationAttempts($orderId), 'a result, not a failure');
         self::assertStringContainsString('reserved +1.0000 past', (string) $this->obligations($orderId)[0]->lastError);
         self::assertContains($orderId, $this->orderIdsRefused(), 'listed for repair');
 

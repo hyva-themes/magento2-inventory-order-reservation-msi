@@ -9,11 +9,10 @@ declare(strict_types=1);
 
 namespace Hyva\InventoryOrderReservationMsi\Test\Unit\Handler;
 
-use Hyva\InventoryOrderReservation\Model\Handler\RepairNeededException;
+use Hyva\InventoryOrderReservation\Model\Handler\RowOutcome;
 use Hyva\InventoryOrderReservation\Model\Obligation;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
 use Hyva\InventoryOrderReservationMsi\Model\Handler\InventoryHandler;
-use Magento\Framework\Exception\LocalizedException;
 use Magento\InventorySalesApi\Api\Data\ItemToSellInterface;
 use Magento\InventorySalesApi\Api\Data\ItemToSellInterfaceFactory;
 use Magento\InventorySalesApi\Api\Data\SalesChannelInterface;
@@ -48,8 +47,9 @@ class InventoryHandlerTest extends TestCase
             new Obligation(9, 'free', 'simple', 0.0, 1, 2, Obligation::MODE_INVENTORY),
         ];
 
-        $handler->register($this->order(9, '000000009'), $owed);
+        $outcomes = $handler->register($this->order(9, '000000009'), $owed);
 
+        self::assertSame(['mug' => 'placed', 'kit' => 'placed', 'free' => 'balanced'], $this->kinds($outcomes));
         self::assertCount(1, $this->placed);
         [$items, $channel, $event] = $this->placed[0];
         // the remainder is read per sku on the recorded stock; Magento's
@@ -64,9 +64,10 @@ class InventoryHandlerTest extends TestCase
         // three ordered, one compensated by hand while the order was given up on: two still missing
         $handler = $this->handler(['mug' => -2.0]);
 
-        $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 3.0, 1, 2, Obligation::MODE_INVENTORY)]);
+        $outcomes = $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 3.0, 1, 2, Obligation::MODE_INVENTORY)]);
 
         self::assertSame([['sku' => 'mug', 'qty' => -2.0]], $this->placed[0][0], 'the two still missing, not the three ordered');
+        self::assertSame(-2.0, $outcomes[0]->placed);
     }
 
     public function test_an_order_whose_rows_already_balance_places_nothing(): void
@@ -74,12 +75,13 @@ class InventoryHandlerTest extends TestCase
         // shipped, canceled or repaired in full before the registration ran
         $handler = $this->handler(['mug' => 0.0]);
 
-        $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 3.0, 1, 2, Obligation::MODE_INVENTORY)]);
+        $outcomes = $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 3.0, 1, 2, Obligation::MODE_INVENTORY)]);
 
         self::assertSame([], $this->placed, 'nothing to place, nothing written');
+        self::assertSame(['mug' => 'balanced'], $this->kinds($outcomes));
     }
 
-    public function test_a_sku_reserved_past_what_the_order_owes_is_given_up_on_for_repair(): void
+    public function test_a_sku_reserved_past_what_the_order_owes_is_refused_for_repair_while_the_others_are_placed(): void
     {
         // three ordered, four on the rows: a placement cannot take a unit back
         $handler = $this->handler(['cup' => -2.0, 'mug' => 1.0]);
@@ -88,21 +90,36 @@ class InventoryHandlerTest extends TestCase
             new Obligation(9, 'mug', 'simple', 3.0, 1, 2, Obligation::MODE_INVENTORY),
         ];
 
-        try {
-            $handler->register($this->order(9, '000000009'), $owed);
-            self::fail('a surplus must be given up on');
-        } catch (RepairNeededException $e) {
-            self::assertSame('Sku mug is reserved +1.0000 past what the order owes on stock 2; nothing to place, a compensation of +1.0000 repairs it.', $e->getMessage());
-        }
-        self::assertSame([], $this->placed, 'nothing placed for any sku: the order is given up on as a whole');
+        $outcomes = $handler->register($this->order(9, '000000009'), $owed);
+
+        self::assertSame(['cup' => 'placed', 'mug' => 'refused'], $this->kinds($outcomes));
+        self::assertSame('Sku mug is reserved +1.0000 past what the order owes on stock 2; nothing to place, a compensation of +1.0000 repairs it.', $outcomes[1]->reason);
+        self::assertSame([2 => 1.0], $outcomes[1]->remainders);
+        self::assertSame([['sku' => 'cup', 'qty' => -2.0]], $this->placed[0][0], 'the other sku is placed in the same run');
     }
 
     public function test_an_obligation_without_a_stock_is_refused(): void
     {
         $handler = $this->handler([]);
-        $this->expectException(LocalizedException::class);
-        $this->expectExceptionMessage('names no stock');
-        $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 1.0, 1, null, Obligation::MODE_INVENTORY)]);
+
+        $outcomes = $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 1.0, 1, null, Obligation::MODE_INVENTORY)]);
+
+        self::assertSame(['mug' => 'refused'], $this->kinds($outcomes));
+        self::assertStringContainsString('assigned to no stock', $outcomes[0]->reason);
+        self::assertSame([], $this->placed);
+    }
+
+    /**
+     * @param RowOutcome[] $outcomes
+     * @return array<string, string> sku => kind
+     */
+    private function kinds(array $outcomes): array
+    {
+        $kinds = [];
+        foreach ($outcomes as $outcome) {
+            $kinds[$outcome->row->sku] = $outcome->kind;
+        }
+        return $kinds;
     }
 
     /**

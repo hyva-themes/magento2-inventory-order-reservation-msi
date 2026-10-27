@@ -19,9 +19,12 @@ use Magento\Sales\Api\OrderRepositoryInterface;
 use Magento\Sales\Model\OrderMutexInterface;
 
 /**
- * A manual compensation that names an order, under that order's lock:
- * the order's owed registration completes first, then the request is
- * read against what the order still owes by Magento's own rule.
+ * A manual compensation that names an order, under that order's lock.
+ * The named sku's row is read first: a refused or done row is judged as
+ * it is; an owed row has the order's registration run first, and is
+ * judged after it, or refused as pending when it is still owed then. So
+ * an unrelated row that cannot register never blocks a repair, and a
+ * failed registration reaches the caller with nothing judged.
  *
  * The request is held against the order's persisted obligation before
  * anything is calculated: a sku the order owes nothing on, an obligation
@@ -67,13 +70,24 @@ class CoordinatedCompensation
 
     private function applyLocked(int $orderId, ReservationInterface $reservation): Outcome
     {
-        $ran = $this->registration->registerLocked($orderId);
         $sku = (string) $reservation->getSku();
         $stockId = (int) $reservation->getStockId();
         $requested = (float) $reservation->getQuantity();
+        // the named row first: a refused or done row is judged as it is, so
+        // an unrelated row that cannot register never blocks a repair
         $obligation = $this->obligationFor($orderId, $sku);
         if ($obligation === null) {
-            return $this->refuse($sku, $stockId, $requested, $ran, 'the order owes nothing on this sku');
+            return $this->refuse($sku, $stockId, $requested, false, 'the order owes nothing on this sku');
+        }
+        $ran = false;
+        if ($obligation->isOwed()) {
+            // the module's own to place first; a failure here rolls the
+            // transaction back and reaches the caller, nothing judged
+            $ran = $this->registration->registerLocked($orderId);
+            $obligation = $this->obligationFor($orderId, $sku) ?? $obligation;
+            if ($obligation->isOwed()) {
+                return $this->refuse($sku, $stockId, $requested, $ran, 'its registration is this module\'s and has not run');
+            }
         }
         if ($obligation->mode !== Obligation::MODE_INVENTORY || $obligation->stockId === null) {
             return $this->refuse($sku, $stockId, $requested, $ran, 'the order\'s stock side is the legacy stock item, not a Magento Inventory stock');
