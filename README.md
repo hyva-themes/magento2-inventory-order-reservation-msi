@@ -11,7 +11,7 @@ composer require hyva-themes/magento2-inventory-order-reservation hyva-themes/ma
 bin/magento setup:upgrade
 ```
 
-The package requires the MSI modules it uses (`magento/module-inventory-sales`, `-reservations`, `-catalog`, `-configuration` and `-reservation-cli`) and the core module at `^1.0`.
+The package requires the MSI modules it uses (`magento/module-inventory-sales`, `-reservations`, `-catalog`, `-configuration` and `-reservation-cli`) and the core module at `^0.1`.
 
 If your store removed MSI with `yireo/magento2-replace-inventory`, Composer will refuse to install this package. That is on purpose. A replace package tells Composer the MSI modules are present, so without the conflict the install would go through and `setup:di:compile` would break on the missing interfaces. Stores without MSI install the core module alone.
 
