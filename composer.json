@@ -34,6 +34,9 @@
         "magento/module-inventory-configuration": "*",
         "magento/module-inventory-reservation-cli": "*"
     },
+    "conflict": {
+        "yireo/magento2-replace-inventory": "*"
+    },
     "autoload": {
         "files": [
             "src/registration.php"

@@ -91,7 +91,7 @@ class PartialRepairTest extends StoreCase
         self::assertSame(-4.0, $this->reservationSum($orderId, $stock), 'nothing written');
         self::assertSame('refused', $this->obligationStatus($orderId), 'refused at once, not after the attempt limit');
         self::assertSame(0, $this->obligationAttempts($orderId), 'a result, not a failure');
-        self::assertStringContainsString('reserved +1.0000 past', (string) $this->obligations($orderId)[0]->lastError);
+        self::assertStringContainsString('holds +1.0000 past what the order owes', (string) $this->obligations($orderId)[0]->lastError);
         self::assertContains($orderId, $this->orderIdsRefused(), 'listed for repair');
 
         // the compensation the reason names: applied, the sku settled, the order off the list

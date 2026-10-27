@@ -15,6 +15,7 @@ use Hyva\InventoryOrderReservation\Model\StockRegistration;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\InventoryReservationsApi\Model\AppendReservationsInterface;
 use Magento\InventoryReservationsApi\Model\ReservationInterface;
+use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Magento\Sales\Model\OrderMutexInterface;
 
@@ -28,14 +29,14 @@ use Magento\Sales\Model\OrderMutexInterface;
  *
  * The request is held against the order's persisted obligation before
  * anything is calculated: a sku the order owes nothing on, an obligation
- * settled on the legacy stock item (no stock to compensate), or a stock
- * other than the one the obligation names, is refused outright, so a
- * compensation can never reach a stock the order is not registered on.
- * Then, on the obligation's stock: already balanced, nothing is written;
- * the right amount, or part of it toward balance, is written with the
- * remainder reported; the wrong direction or more than remains is
- * refused with the current discrepancy. A refusal never touches the
- * registration, which is complete on its own by then.
+ * or settled on the legacy stock item (no stock to compensate), is
+ * refused outright.
+ * Then, on the stock the request names: already balanced, nothing is
+ * written; the right amount, or part of it toward balance, is written
+ * with the remainder reported; the wrong direction or more than remains
+ * is refused with the current discrepancy. A refused row is settled when
+ * nothing remains on any stock that matters to it. A refusal never
+ * touches the registration, which is complete on its own by then.
  */
 class CoordinatedCompensation
 {
@@ -92,19 +93,13 @@ class CoordinatedCompensation
         if ($obligation->mode !== Obligation::MODE_INVENTORY || $obligation->stockId === null) {
             return $this->refuse($sku, $stockId, $requested, $ran, 'the order\'s stock side is the legacy stock item, not a Magento Inventory stock');
         }
-        // what the order still owes on the sku by Magento's own rule, on the stock it is registered on
+        // judged on the stock the request names: the order's expectation on
+        // the stock the website sells from now, zero elsewhere, less the rows
+        // on that stock; a stock the order expects nothing on and holds no
+        // row on is balanced, which keeps a compensation off a stock the
+        // order has nothing to do with
         $order = $this->orderRepository->get($orderId);
-        $remaining = $this->remaining->forOrderSku($order, $sku, $obligation->stockId)['remaining'];
-        if ($obligation->stockId !== $stockId) {
-            return $this->refuse(
-                $sku,
-                $stockId,
-                $requested,
-                $ran,
-                sprintf('stock %d named, the order is registered on stock %d', $stockId, $obligation->stockId),
-                $remaining
-            );
-        }
+        $remaining = $this->remaining->forOrderSku($order, $sku, $stockId)['remaining'];
         if (abs($remaining) < Obligation::TOLERANCE) {
             return new Outcome(Outcome::ALREADY_BALANCED, $sku, $stockId, $requested, 0.0, 0.0, $ran);
         }
@@ -128,10 +123,11 @@ class CoordinatedCompensation
             $this->writing = false;
         }
         $after = round($remaining - $requested, 4);
-        if ($obligation->isRefused() && abs($after) < Obligation::TOLERANCE) {
-            // the registration gave the order up; this compensation settled
-            // this sku. The order's other skus keep their own state until
-            // each is balanced, so one repair never hides another discrepancy.
+        if ($obligation->isRefused() && $this->balancedEverywhere($order, $sku, $obligation->stockId)) {
+            // the registration refused this row; this compensation settled
+            // it, nothing remaining on any stock that matters to it. The
+            // order's other skus keep their own state until each is balanced,
+            // so one repair never hides another discrepancy.
             $this->obligations->markRowDone($orderId, $sku, Obligation::SETTLED_BY_COMPENSATION);
         }
         return new Outcome(
@@ -143,6 +139,19 @@ class CoordinatedCompensation
             $after,
             $ran
         );
+    }
+
+    /**
+     * Whether nothing remains for the row on any stock that matters to it, read again after the write.
+     */
+    private function balancedEverywhere(OrderInterface $order, string $sku, int $recordedStockId): bool
+    {
+        foreach ($this->remaining->remaindersForRow($order, $sku, $recordedStockId) as $remaining) {
+            if (abs($remaining) >= Obligation::TOLERANCE) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

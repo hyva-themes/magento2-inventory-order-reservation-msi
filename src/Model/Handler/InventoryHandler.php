@@ -40,9 +40,15 @@ use Magento\Sales\Api\Data\OrderInterface;
  *
  * One item per sku, for what the order still owes on it by Magento's own
  * rule: a shipment, a cancellation or a partial compensation that came
- * first is on the rows already and is not placed again. A sku reserved
- * past what the order owes is nothing a placement can fix: that row is
- * refused for a compensation of the surplus, while the order's other rows
+ * first is on the rows already and is not placed again. Completion is
+ * decided per row over every stock that matters to it (the recorded
+ * stock, the stock the website sells from now, every stock holding a row
+ * for the order and sku): nothing remains anywhere, the row is balanced;
+ * the one thing remaining is a lack on the recorded stock, it is placed
+ * there; anything remains elsewhere, or a surplus on the recorded stock,
+ * the row is refused naming each stock and its remainder, since the
+ * writer repairs the recorded stock only and only downward, and a
+ * compensation on each stock named repairs it. The order's other rows
  * are placed in the same run.
  */
 class InventoryHandler implements HandlerInterface
@@ -81,23 +87,25 @@ class InventoryHandler implements HandlerInterface
                 ));
                 continue;
             }
-            // what is ordered and neither canceled, refunded nor shipped,
-            // less the rows already there on the stock the order was recorded on
-            $remaining = $this->remaining->forOrderSku($order, $obligation->sku, $obligation->stockId)['remaining'];
-            if (abs($remaining) < Obligation::TOLERANCE) {
+            // what remains on every stock that matters to the row: the recorded
+            // stock, the stock the website sells from now, every stock with a row
+            $remainders = $this->remaining->remaindersForRow($order, $obligation->sku, $obligation->stockId);
+            $nonZero = array_filter($remainders, static fn (float $remaining): bool => abs($remaining) >= Obligation::TOLERANCE);
+            if ($nonZero === []) {
                 $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
                 continue;
             }
-            if ($remaining > 0) {
-                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: (string) __(
-                    'Sku %1 is reserved %2 past what the order owes on stock %3; nothing to place, a compensation of %2 repairs it.',
-                    $obligation->sku,
-                    sprintf('%+.4f', $remaining),
-                    $obligation->stockId
-                ), remainders: [$obligation->stockId => $remaining]);
+            $onRecorded = $remainders[$obligation->stockId];
+            if (count($nonZero) === 1 && isset($nonZero[$obligation->stockId]) && $onRecorded < 0) {
+                $toPlace[$index] = [$obligation, $onRecorded];
                 continue;
             }
-            $toPlace[$index] = [$obligation, $remaining];
+            $outcomes[$index] = new RowOutcome(
+                $obligation,
+                RowOutcome::REFUSED,
+                reason: $this->refusal($obligation, $nonZero, $this->remaining->currentStockId($order)),
+                remainders: $nonZero
+            );
         }
         if ($toPlace === []) {
             ksort($outcomes);
@@ -128,6 +136,25 @@ class InventoryHandler implements HandlerInterface
         }
         ksort($outcomes);
         return array_values($outcomes);
+    }
+
+    /**
+     * Why a row cannot be placed: each stock with a remainder and the compensation that repairs it, and the move when the website sells from another stock than the one recorded.
+     *
+     * @param array<int, float> $nonZero stock id => remaining
+     */
+    private function refusal(Obligation $obligation, array $nonZero, int $currentStockId): string
+    {
+        $parts = [];
+        foreach ($nonZero as $stockId => $remaining) {
+            $parts[] = $remaining < 0
+                ? (string) __('stock %1 lacks %2, a compensation of %2 on it repairs that', $stockId, sprintf('%+.4f', $remaining))
+                : (string) __('stock %1 holds %2 past what the order owes, a compensation of %2 on it repairs that', $stockId, sprintf('%+.4f', $remaining));
+        }
+        $moved = $currentStockId !== $obligation->stockId
+            ? (string) __('the website sells from stock %1 now and the order was recorded on stock %2; ', $currentStockId, $obligation->stockId)
+            : '';
+        return (string) __('Sku %1: %2%3. Nothing is placed.', $obligation->sku, $moved, implode('; ', $parts));
     }
 
     /**

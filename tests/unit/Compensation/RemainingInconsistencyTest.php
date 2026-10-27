@@ -13,6 +13,11 @@ use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
 use Magento\Framework\App\ResourceConnection;
 use Magento\InventoryConfigurationApi\Api\GetStockItemConfigurationInterface;
 use Magento\InventoryConfigurationApi\Model\IsSourceItemManagementAllowedForProductTypeInterface;
+use Hyva\InventoryOrderReservation\Model\ResourceModel\WebsiteStock;
+use Magento\InventoryConfigurationApi\Api\Data\StockItemConfigurationInterface;
+use Magento\Store\Api\Data\StoreInterface;
+use Magento\Store\Api\Data\WebsiteInterface;
+use Magento\Store\Api\WebsiteRepositoryInterface;
 use Magento\Sales\Model\Order;
 use Magento\Sales\Model\Order\Item;
 use PHPUnit\Framework\Attributes\Test;
@@ -35,6 +40,15 @@ class RemainingInconsistencyTest extends TestCase
         ]);
         // 5 - 1 - 1 - 1 = 2, plus 2 untouched: minus 4
         self::assertSame(-4.0, $this->service()->expectedSum($order, 'mug'));
+    }
+
+    public function test_the_expectation_counts_on_the_stock_the_website_sells_from_now_and_is_zero_elsewhere(): void
+    {
+        $order = $this->order(Order::STATE_PROCESSING, [$this->item('mug', 'simple', 2, 0, 0, 0, 0, false)]);
+        $service = $this->service();
+        self::assertSame(-2.0, $service->expectedSum($order, 'mug', 2), 'the website sells from stock 2');
+        self::assertSame(0.0, $service->expectedSum($order, 'mug', 1), 'another stock: Magento counts nothing there');
+        self::assertSame(-2.0, $service->expectedSum($order, 'mug'), 'no stock named: the order\'s expectation itself');
     }
 
     public function test_a_virtual_line_counts_what_is_invoiced_instead_of_shipped(): void
@@ -123,9 +137,17 @@ class RemainingInconsistencyTest extends TestCase
         $allowed->method('execute')->willReturnCallback(
             static fn (string $type): bool => $managed === null || $managed->execute($type)
         );
+        $managedItem = $this->createMock(StockItemConfigurationInterface::class);
+        $managedItem->method('isManageStock')->willReturn(true);
         $configuration = $this->createMock(GetStockItemConfigurationInterface::class);
-        $configuration->expects(self::never())->method('execute');
-        return new RemainingInconsistency($this->createMock(ResourceConnection::class), $allowed, $configuration);
+        $configuration->method('execute')->willReturn($managedItem);
+        $websiteStock = $this->createMock(WebsiteStock::class);
+        $websiteStock->method('idForWebsiteCode')->with('base')->willReturn(2);
+        $website = $this->createMock(WebsiteInterface::class);
+        $website->method('getCode')->willReturn('base');
+        $websites = $this->createMock(WebsiteRepositoryInterface::class);
+        $websites->method('getById')->with(1)->willReturn($website);
+        return new RemainingInconsistency($this->createMock(ResourceConnection::class), $allowed, $configuration, $websiteStock, $websites);
     }
 
     private function item(string $sku, string $type, float $ordered, float $canceled, float $refunded, float $shipped, float $invoiced, bool $virtual): Item
@@ -147,9 +169,12 @@ class RemainingInconsistencyTest extends TestCase
     /** @param Item[] $items */
     private function order(string $state, array $items): Order
     {
-        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()->onlyMethods(['getState', 'getItems'])->getMock();
+        $store = $this->createMock(StoreInterface::class);
+        $store->method('getWebsiteId')->willReturn(1);
+        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()->onlyMethods(['getState', 'getItems', 'getStore'])->getMock();
         $order->method('getState')->willReturn($state);
         $order->method('getItems')->willReturn($items);
+        $order->method('getStore')->willReturn($store);
         return $order;
     }
 }

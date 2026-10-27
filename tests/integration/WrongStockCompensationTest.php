@@ -13,12 +13,13 @@ use Hyva\InventoryOrderReservation\Test\Integration\StoreCase;
 use Magento\Framework\Exception\CouldNotSaveException;
 
 /**
- * A manual compensation that names a stock the order is not registered
- * on writes nothing, on either stock.
+ * A manual compensation that names a stock the order has nothing to do
+ * with (nothing expected there, no row there) is balanced there and
+ * writes nothing, on either stock.
  */
 class WrongStockCompensationTest extends StoreCase
 {
-    public function test_a_compensation_on_another_stock_is_refused_and_both_stocks_are_untouched(): void
+    public function test_a_compensation_on_a_stock_the_order_has_nothing_to_do_with_is_balanced_and_both_stocks_are_untouched(): void
     {
         $this->requireInventory();
         $stockA = $this->websiteStockId();
@@ -32,12 +33,9 @@ class WrongStockCompensationTest extends StoreCase
 
         try {
             $this->append([$this->manualCompensation($orderId, $stockB, -1.0)]);
-            self::fail('the wrong-stock compensation must be refused');
+            self::fail('the compensation on the other stock must be refused');
         } catch (CouldNotSaveException $e) {
-            self::assertStringContainsString(
-                sprintf('stock %d named, the order is registered on stock %d', $stockB, $stockA),
-                $e->getMessage()
-            );
+            self::assertStringContainsString('already balanced, nothing written', $e->getMessage());
         }
 
         self::assertSame(-1.0, $this->reservationSum($orderId, $stockA), 'stock A unchanged');

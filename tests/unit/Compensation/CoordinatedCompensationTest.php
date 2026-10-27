@@ -76,21 +76,52 @@ class CoordinatedCompensationTest extends TestCase
         self::assertStringContainsString('-1.0000', $tooMuch->describe());
     }
 
-    public function test_a_stock_the_order_is_not_registered_on_is_refused_with_nothing_written(): void
+    public function test_a_stock_the_order_expects_nothing_on_and_holds_no_row_on_is_balanced_and_takes_nothing(): void
     {
-        // the obligation says stock 2; the request names stock 1: nothing
-        // is written on either, and the remainder is read on the order's own stock
+        // the obligation says stock 2; the request names stock 1, where Magento
+        // counts nothing for the order and no row exists: judged there, balanced
         $remainingService = $this->createMock(RemainingInconsistency::class);
         $remainingService->expects(self::once())->method('forOrderSku')
-            ->with(self::anything(), 'mug', 2)
-            ->willReturn(['expected' => -1.0, 'actual' => -1.0, 'remaining' => 0.0]);
+            ->with(self::anything(), 'mug', 1)
+            ->willReturn(['expected' => 0.0, 'actual' => 0.0, 'remaining' => 0.0]);
         $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 0), remainingService: $remainingService);
 
         $outcome = $service->apply(9, $this->reservation('mug', 1, -1.0));
 
-        self::assertTrue($outcome->isRefused());
-        self::assertSame('stock 1 named, the order is registered on stock 2', $outcome->reason);
+        self::assertSame(Outcome::ALREADY_BALANCED, $outcome->kind);
         self::assertSame(1, $outcome->stockId);
+    }
+
+    public function test_a_compensation_on_the_stock_the_website_moved_to_repairs_what_remains_there(): void
+    {
+        // recorded on stock 2, the website sells from stock 1 now and the shipment's row sits there: stock 1 lacks -1
+        $remainingService = $this->createMock(RemainingInconsistency::class);
+        $remainingService->method('forOrderSku')->with(self::anything(), 'mug', 1)
+            ->willReturn(['expected' => 0.0, 'actual' => 1.0, 'remaining' => -1.0]);
+        $remainingService->method('remaindersForRow')->willReturn([1 => 0.0, 2 => 0.0]);
+        $obligations = $this->refusedRows();
+        $obligations->expects(self::once())->method('markRowDone')->with(9, 'mug', Obligation::SETTLED_BY_COMPENSATION);
+        $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 1), remainingService: $remainingService, obligations: $obligations);
+
+        $outcome = $service->apply(9, $this->reservation('mug', 1, -1.0));
+
+        self::assertSame(Outcome::APPLIED, $outcome->kind);
+        self::assertSame(1, $outcome->stockId);
+    }
+
+    public function test_a_refused_row_is_settled_only_when_nothing_remains_on_any_stock(): void
+    {
+        // one unit shipped on each stock around a move: stock 2 repaired, stock 1 still lacks one
+        $remainingService = $this->createMock(RemainingInconsistency::class);
+        $remainingService->method('forOrderSku')->willReturn(['expected' => 0.0, 'actual' => 1.0, 'remaining' => -1.0]);
+        $remainingService->method('remaindersForRow')->willReturn([1 => -1.0, 2 => 0.0]);
+        $obligations = $this->refusedRows();
+        $obligations->expects(self::never())->method('markRowDone');
+        $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 1), remainingService: $remainingService, obligations: $obligations);
+
+        $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
+
+        self::assertSame(Outcome::APPLIED, $outcome->kind, 'applied on stock 2, the row not settled yet');
     }
 
     public function test_a_refused_row_is_judged_without_registering_the_orders_other_rows(): void
@@ -273,6 +304,10 @@ class CoordinatedCompensationTest extends TestCase
         if ($remainingService === null) {
             $remainingService = $this->createMock(RemainingInconsistency::class);
             $remainingService->method('forOrderSku')->willReturn(['expected' => $remaining, 'actual' => 0.0, 'remaining' => $remaining]);
+            // after a write of the whole remainder nothing is left on the one stock; a partial write leaves the rest
+            $remainingService->method('remaindersForRow')->willReturnCallback(
+                static fn (): array => [2 => $remaining + 1.0 < -Obligation::TOLERANCE ? round($remaining + 1.0, 4) : 0.0]
+            );
         }
         if ($obligations === null) {
             // the named row is read first: owed when the registration is to

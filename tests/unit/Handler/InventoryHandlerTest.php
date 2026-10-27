@@ -109,9 +109,49 @@ class InventoryHandlerTest extends TestCase
         $outcomes = $handler->register($this->order(9, '000000009'), $owed);
 
         self::assertSame(['cup' => 'placed', 'mug' => 'refused'], $this->kinds($outcomes));
-        self::assertSame('Sku mug is reserved +1.0000 past what the order owes on stock 2; nothing to place, a compensation of +1.0000 repairs it.', $outcomes[1]->reason);
+        self::assertSame('Sku mug: stock 2 holds +1.0000 past what the order owes, a compensation of +1.0000 on it repairs that. Nothing is placed.', $outcomes[1]->reason);
         self::assertSame([2 => 1.0], $outcomes[1]->remainders);
         self::assertSame(['cup'], array_column($this->written, 'sku'), 'the other sku is placed in the same run');
+    }
+
+    public function test_a_lack_on_the_stock_the_website_moved_to_is_refused_naming_the_move_and_the_stock(): void
+    {
+        // recorded on stock 2, the website sells from stock 1 now, the shipment's row sits there: nothing is placed
+        $handler = $this->handler([], remaindersBySku: ['mug' => [1 => -1.0, 2 => 0.0]], currentStock: 1);
+
+        $outcomes = $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY)]);
+
+        self::assertSame(['mug' => 'refused'], $this->kinds($outcomes));
+        self::assertSame(
+            'Sku mug: the website sells from stock 1 now and the order was recorded on stock 2; stock 1 lacks -1.0000, a compensation of -1.0000 on it repairs that. Nothing is placed.',
+            $outcomes[0]->reason
+        );
+        self::assertSame([1 => -1.0], $outcomes[0]->remainders);
+        self::assertSame(0, $this->appends);
+    }
+
+    public function test_a_lack_on_the_recorded_stock_alone_is_placed_there_after_a_move(): void
+    {
+        // shipped on stock 2 before the website moved to stock 1: the placement on 2 balances the shipment
+        $handler = $this->handler([], remaindersBySku: ['mug' => [1 => 0.0, 2 => -1.0]], currentStock: 1);
+
+        $outcomes = $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY)]);
+
+        self::assertSame(['mug' => 'placed'], $this->kinds($outcomes));
+        self::assertSame(2, $this->written[0]['stock']);
+    }
+
+    public function test_a_split_shipment_around_a_move_is_refused_naming_both_stocks(): void
+    {
+        $handler = $this->handler([], remaindersBySku: ['mug' => [1 => -1.0, 2 => -1.0]], currentStock: 1);
+
+        $outcomes = $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY)]);
+
+        self::assertSame(['mug' => 'refused'], $this->kinds($outcomes));
+        self::assertSame([1 => -1.0, 2 => -1.0], $outcomes[0]->remainders);
+        self::assertStringContainsString('stock 1 lacks -1.0000', $outcomes[0]->reason);
+        self::assertStringContainsString('stock 2 lacks -1.0000', $outcomes[0]->reason);
+        self::assertSame(0, $this->appends, 'placing on the recorded stock alone would leave the row half repaired');
     }
 
     public function test_a_type_inventory_does_not_manage_is_balanced_without_a_row_and_an_unknown_sku_is_written(): void
@@ -143,11 +183,13 @@ class InventoryHandlerTest extends TestCase
     /**
      * The handler over Inventory's builder and writer, recording the rows, with each sku's remainder on its recorded stock as given; every sku a managed simple product unless said otherwise.
      *
-     * @param array<string, float> $remainingBySku
+     * @param array<string, float> $remainingBySku the remainder on the recorded stock 2, the one stock that matters, per sku
      * @param array<string, string> $types the catalog's type per sku; a sku not named is not in the catalog
      * @param callable(string): bool|null $managed whether a type allows source-item management
+     * @param array<string, array<int, float>> $remaindersBySku the remainders per stock for a sku, when more than one stock matters
+     * @param int $currentStock the stock the website sells from now
      */
-    private function handler(array $remainingBySku, array $types = [], ?callable $managed = null): InventoryHandler
+    private function handler(array $remainingBySku, array $types = [], ?callable $managed = null, array $remaindersBySku = [], int $currentStock = 2): InventoryHandler
     {
         $builder = $this->createMock(ReservationBuilderInterface::class);
         $row = [];
@@ -216,13 +258,10 @@ class InventoryHandlerTest extends TestCase
         $allowed = $this->createMock(IsSourceItemManagementAllowedForProductTypeInterface::class);
         $allowed->method('execute')->willReturnCallback(static fn (string $type): bool => $managed === null || $managed($type));
         $remaining = $this->createMock(RemainingInconsistency::class);
-        $remaining->method('forOrderSku')->willReturnCallback(
-            static fn (object $order, string $sku, int $stockId): array => [
-                'expected' => $remainingBySku[$sku] ?? 0.0,
-                'actual' => 0.0,
-                'remaining' => $remainingBySku[$sku] ?? 0.0,
-            ]
+        $remaining->method('remaindersForRow')->willReturnCallback(
+            static fn (object $order, string $sku, int $recordedStock): array => $remaindersBySku[$sku] ?? [$recordedStock => $remainingBySku[$sku] ?? 0.0]
         );
+        $remaining->method('currentStockId')->willReturn($currentStock);
         return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining);
     }
 
