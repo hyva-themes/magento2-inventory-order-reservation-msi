@@ -1,0 +1,4 @@
+All files copyright © 2026-present by Hyvä Themes are distributed dual-licensed under OSL 3.0 and the AFL 3.0.
+
+Please see http://opensource.org/licenses/osl-3.0.php or LICENSE.txt for the full text of the OSL 3.0 license.
+Please see http://opensource.org/licenses/afl-3.0.php or LICENSE_AFL.txt for the full text of the AFL 3.0 license.

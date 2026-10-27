@@ -1,0 +1,51 @@
+{
+    "name": "hyva-themes/magento2-inventory-order-reservation-msi",
+    "description": "The Magento Inventory half of hyva-themes/magento2-inventory-order-reservation: places the order_placed reservation for an order created through Magento's order API and coordinates Magento's reservation repair tools with the module's own record.",
+    "type": "magento2-module",
+    "license": [
+        "OSL-3.0",
+        "AFL-3.0"
+    ],
+    "keywords": [
+        "magento2",
+        "inventory",
+        "msi",
+        "reservation",
+        "rest-api",
+        "orders"
+    ],
+    "authors": [
+        {
+            "name": "Hyvä Themes B.V.",
+            "homepage": "https://hyva.io"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "hyva-themes/magento2-inventory-order-reservation": "^1.0",
+        "magento/framework": "*",
+        "magento/module-sales": "*",
+        "magento/module-store": "*",
+        "magento/module-catalog": "*",
+        "magento/module-catalog-inventory": "*",
+        "magento/module-inventory-sales": "*",
+        "magento/module-inventory-reservations": "*",
+        "magento/module-inventory-catalog": "*",
+        "magento/module-inventory-configuration": "*",
+        "magento/module-inventory-reservation-cli": "*"
+    },
+    "autoload": {
+        "files": [
+            "src/registration.php"
+        ],
+        "psr-4": {
+            "Hyva\\InventoryOrderReservationMsi\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Hyva\\InventoryOrderReservationMsi\\Test\\Unit\\": "tests/unit/"
+        }
+    },
+    "version": "1.0.0"
+}

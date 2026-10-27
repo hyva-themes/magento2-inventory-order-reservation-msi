@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<ruleset name="Hyva_InventoryOrderReservationMsi">
+    <description>HyvaThemes coding standard for the Hyva_InventoryOrderReservationMsi Magento module.</description>
+
+    <rule ref="HyvaThemes"/>
+</ruleset>

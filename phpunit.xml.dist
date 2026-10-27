@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Standalone PHPUnit 10 config for the module's tests/unit directory (a Magento vendor with Inventory).
+    Runs without Magento's test framework; the tests mock the framework
+    interfaces they consume. tests/bootstrap.php finds Magento's vendor
+    autoloader through MAGENTO_VENDOR_PATH or a sibling install.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.4/phpunit.xsd"
+         bootstrap="tests/bootstrap.php"
+         colors="true"
+         beStrictAboutTestsThatDoNotTestAnything="false"
+         failOnEmptyTestSuite="true"
+         failOnRisky="false"
+         failOnWarning="true">
+    <testsuites>
+        <testsuite name="unit">
+            <directory>tests/unit</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory suffix=".php">src</directory>
+        </include>
+    </source>
+</phpunit>

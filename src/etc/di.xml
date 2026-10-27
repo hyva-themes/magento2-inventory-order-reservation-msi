@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<!--
+/**
+ * Hyvä Themes - https://hyva.io
+ * Copyright © Hyvä Themes. All rights reserved.
+ * See COPYING.txt for license details.
+ */
+-->
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <!-- The handler for the core's inventory mode, built on first use. -->
+    <virtualType name="Hyva\InventoryOrderReservation\Model\Handler\Pool">
+        <arguments>
+            <argument name="array" xsi:type="array">
+                <item name="inventory" xsi:type="string">Hyva\InventoryOrderReservationMsi\Model\Handler\InventoryHandler</item>
+            </argument>
+        </arguments>
+    </virtualType>
+    <!-- Magento's repair tools, coordinated: a manual compensation naming an
+         order the core owes completes the registration first and is read
+         against what remains; the listing leaves owed orders out; the
+         command runs Magento's own loop and adds the module's notes under it. -->
+    <type name="Magento\InventoryReservationsApi\Model\AppendReservationsInterface">
+        <plugin name="hyva_inventory_order_reservation_coordinate_manual_compensation"
+                type="Hyva\InventoryOrderReservationMsi\Plugin\Inventory\CoordinateManualCompensationPlugin"
+                sortOrder="10"/>
+    </type>
+    <type name="Magento\InventoryReservationCli\Model\GetSalableQuantityInconsistencies">
+        <plugin name="hyva_inventory_order_reservation_leave_owed_out"
+                type="Hyva\InventoryOrderReservationMsi\Plugin\Inventory\LeaveOwedOrdersOutOfInconsistenciesPlugin"
+                sortOrder="10"/>
+    </type>
+    <type name="Magento\InventoryReservationCli\Command\CreateCompensations">
+        <plugin name="hyva_inventory_order_reservation_report_compensations"
+                type="Hyva\InventoryOrderReservationMsi\Plugin\Console\ReportCompensationsPlugin"
+                sortOrder="10"/>
+    </type>
+</config>

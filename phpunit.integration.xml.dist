@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    PHPUnit 10 config for tests/integration: the module against a live
+    development Magento (MAGENTO_ROOT, default /var/www/html), booted
+    through app/bootstrap.php. The tests write orders, reservations and
+    source quantities for one dedicated sku and put the sku back.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.4/phpunit.xsd"
+         bootstrap="tests/integration/bootstrap.php"
+         colors="true"
+         beStrictAboutTestsThatDoNotTestAnything="false"
+         failOnEmptyTestSuite="true"
+         failOnRisky="false"
+         failOnWarning="false">
+    <testsuites>
+        <testsuite name="integration">
+            <directory>tests/integration</directory>
+        </testsuite>
+    </testsuites>
+</phpunit>
