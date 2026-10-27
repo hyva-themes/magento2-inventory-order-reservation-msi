@@ -13,50 +13,66 @@ use Hyva\InventoryOrderReservation\Model\Handler\RowOutcome;
 use Hyva\InventoryOrderReservation\Model\Obligation;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
 use Hyva\InventoryOrderReservationMsi\Model\Handler\InventoryHandler;
-use Magento\InventorySalesApi\Api\Data\ItemToSellInterface;
-use Magento\InventorySalesApi\Api\Data\ItemToSellInterfaceFactory;
-use Magento\InventorySalesApi\Api\Data\SalesChannelInterface;
-use Magento\InventorySalesApi\Api\Data\SalesChannelInterfaceFactory;
+use Magento\Framework\Serialize\Serializer\Json;
+use Magento\InventoryCatalogApi\Model\GetProductTypesBySkusInterface;
+use Magento\InventoryConfigurationApi\Model\IsSourceItemManagementAllowedForProductTypeInterface;
+use Magento\InventoryReservationsApi\Model\AppendReservationsInterface;
+use Magento\InventoryReservationsApi\Model\ReservationBuilderInterface;
+use Magento\InventoryReservationsApi\Model\ReservationInterface;
+use Magento\InventorySales\Model\SalesEventToArrayConverter;
 use Magento\InventorySalesApi\Api\Data\SalesEventExtensionFactory;
 use Magento\InventorySalesApi\Api\Data\SalesEventExtensionInterface;
 use Magento\InventorySalesApi\Api\Data\SalesEventInterface;
 use Magento\InventorySalesApi\Api\Data\SalesEventInterfaceFactory;
-use Magento\InventorySalesApi\Api\PlaceReservationsForSalesEventInterface;
 use Magento\Sales\Model\Order;
-use Magento\Store\Api\Data\StoreInterface;
-use Magento\Store\Api\Data\WebsiteInterface;
-use Magento\Store\Api\WebsiteRepositoryInterface;
 use PHPUnit\Framework\TestCase;
 
 class InventoryHandlerTest extends TestCase
 {
-    /** @var array<int, array{0: array, 1: array, 2: array}> what the sales-event service was given: items, channel, event */
-    private array $placed = [];
+    /** @var array<int, array{sku: string, qty: float, stock: int, metadata: array}> the rows given to Inventory's writer, in order */
+    private array $written = [];
+
+    /** @var int how many times the writer was called */
+    private int $appends = 0;
 
     protected function setUp(): void
     {
-        $this->placed = [];
+        $this->written = [];
+        $this->appends = 0;
     }
 
-    public function test_one_item_to_sell_per_sku_at_what_it_still_owes_under_an_order_placed_event(): void
+    public function test_one_row_per_sku_on_the_recorded_stock_with_magentos_metadata_in_one_append(): void
     {
-        $handler = $this->handler(['mug' => -2.0, 'kit' => -1.0, 'free' => 0.0]);
+        $handler = $this->handler(['mug' => -2.0, 'cup' => -1.0, 'free' => 0.0]);
         $owed = [
             new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY),
-            new Obligation(9, 'kit', 'bundle', 1.0, 1, 2, Obligation::MODE_INVENTORY),
+            new Obligation(9, 'cup', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY),
             new Obligation(9, 'free', 'simple', 0.0, 1, 2, Obligation::MODE_INVENTORY),
         ];
 
         $outcomes = $handler->register($this->order(9, '000000009'), $owed);
 
-        self::assertSame(['mug' => 'placed', 'kit' => 'placed', 'free' => 'balanced'], $this->kinds($outcomes));
-        self::assertCount(1, $this->placed);
-        [$items, $channel, $event] = $this->placed[0];
-        // the remainder is read per sku on the recorded stock; Magento's
-        // placement reads each sku's type from the catalog, so nothing is filtered here
-        self::assertSame([['sku' => 'mug', 'qty' => -2.0], ['sku' => 'kit', 'qty' => -1.0]], $items);
-        self::assertSame(['type' => 'website', 'code' => 'base'], $channel);
-        self::assertSame(['type' => 'order_placed', 'objectType' => 'order', 'objectId' => '9', 'objectIncrementId' => '000000009'], $event);
+        self::assertSame(['mug' => 'placed', 'cup' => 'placed', 'free' => 'balanced'], $this->kinds($outcomes));
+        self::assertSame(1, $this->appends, 'one append for the order');
+        self::assertSame(
+            [['sku' => 'mug', 'qty' => -2.0, 'stock' => 2], ['sku' => 'cup', 'qty' => -1.0, 'stock' => 2]],
+            array_map(static fn (array $row): array => ['sku' => $row['sku'], 'qty' => $row['qty'], 'stock' => $row['stock']], $this->written)
+        );
+        self::assertSame(
+            ['event_type' => 'order_placed', 'object_type' => 'order', 'object_id' => '9', 'object_increment_id' => '000000009'],
+            $this->written[0]['metadata'],
+            'the metadata Magento writes for a placement'
+        );
+    }
+
+    public function test_the_recorded_stock_is_written_whatever_the_website_maps_to_now(): void
+    {
+        // recorded on stock 2; the rows name it, the website's mapping of the day is never read
+        $handler = $this->handler(['mug' => -1.0]);
+
+        $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY)]);
+
+        self::assertSame(2, $this->written[0]['stock']);
     }
 
     public function test_a_retry_after_a_partial_compensation_places_only_what_is_still_missing(): void
@@ -66,7 +82,7 @@ class InventoryHandlerTest extends TestCase
 
         $outcomes = $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 3.0, 1, 2, Obligation::MODE_INVENTORY)]);
 
-        self::assertSame([['sku' => 'mug', 'qty' => -2.0]], $this->placed[0][0], 'the two still missing, not the three ordered');
+        self::assertSame(-2.0, $this->written[0]['qty'], 'the two still missing, not the three ordered');
         self::assertSame(-2.0, $outcomes[0]->placed);
     }
 
@@ -77,7 +93,7 @@ class InventoryHandlerTest extends TestCase
 
         $outcomes = $handler->register($this->order(9, '000000009'), [new Obligation(9, 'mug', 'simple', 3.0, 1, 2, Obligation::MODE_INVENTORY)]);
 
-        self::assertSame([], $this->placed, 'nothing to place, nothing written');
+        self::assertSame(0, $this->appends, 'nothing to place, nothing written');
         self::assertSame(['mug' => 'balanced'], $this->kinds($outcomes));
     }
 
@@ -95,7 +111,22 @@ class InventoryHandlerTest extends TestCase
         self::assertSame(['cup' => 'placed', 'mug' => 'refused'], $this->kinds($outcomes));
         self::assertSame('Sku mug is reserved +1.0000 past what the order owes on stock 2; nothing to place, a compensation of +1.0000 repairs it.', $outcomes[1]->reason);
         self::assertSame([2 => 1.0], $outcomes[1]->remainders);
-        self::assertSame([['sku' => 'cup', 'qty' => -2.0]], $this->placed[0][0], 'the other sku is placed in the same run');
+        self::assertSame(['cup'], array_column($this->written, 'sku'), 'the other sku is placed in the same run');
+    }
+
+    public function test_a_type_inventory_does_not_manage_is_balanced_without_a_row_and_an_unknown_sku_is_written(): void
+    {
+        // Magento's own filter: a bundle holds no stock of its own; a sku the catalog does not hold is written as the service writes it
+        $handler = $this->handler(['kit' => -1.0, 'ghost' => -1.0], types: ['kit' => 'bundle'], managed: static fn (string $type): bool => $type !== 'bundle');
+        $owed = [
+            new Obligation(9, 'kit', 'bundle', 1.0, 1, 2, Obligation::MODE_INVENTORY),
+            new Obligation(9, 'ghost', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY),
+        ];
+
+        $outcomes = $handler->register($this->order(9, '000000009'), $owed);
+
+        self::assertSame(['kit' => 'balanced', 'ghost' => 'placed'], $this->kinds($outcomes));
+        self::assertSame(['ghost'], array_column($this->written, 'sku'));
     }
 
     public function test_an_obligation_without_a_stock_is_refused(): void
@@ -106,7 +137,93 @@ class InventoryHandlerTest extends TestCase
 
         self::assertSame(['mug' => 'refused'], $this->kinds($outcomes));
         self::assertStringContainsString('assigned to no stock', $outcomes[0]->reason);
-        self::assertSame([], $this->placed);
+        self::assertSame(0, $this->appends);
+    }
+
+    /**
+     * The handler over Inventory's builder and writer, recording the rows, with each sku's remainder on its recorded stock as given; every sku a managed simple product unless said otherwise.
+     *
+     * @param array<string, float> $remainingBySku
+     * @param array<string, string> $types the catalog's type per sku; a sku not named is not in the catalog
+     * @param callable(string): bool|null $managed whether a type allows source-item management
+     */
+    private function handler(array $remainingBySku, array $types = [], ?callable $managed = null): InventoryHandler
+    {
+        $builder = $this->createMock(ReservationBuilderInterface::class);
+        $row = [];
+        $builder->method('setSku')->willReturnCallback(function (string $sku) use (&$row, $builder): ReservationBuilderInterface {
+            $row['sku'] = $sku;
+            return $builder;
+        });
+        $builder->method('setQuantity')->willReturnCallback(function (float $qty) use (&$row, $builder): ReservationBuilderInterface {
+            $row['qty'] = $qty;
+            return $builder;
+        });
+        $builder->method('setStockId')->willReturnCallback(function (int $stock) use (&$row, $builder): ReservationBuilderInterface {
+            $row['stock'] = $stock;
+            return $builder;
+        });
+        $builder->method('setMetadata')->willReturnCallback(function (?string $metadata) use (&$row, $builder): ReservationBuilderInterface {
+            $row['metadata'] = json_decode((string) $metadata, true);
+            return $builder;
+        });
+        $builder->method('build')->willReturnCallback(function () use (&$row): ReservationInterface {
+            $reservation = $this->createMock(ReservationInterface::class);
+            $reservation->method('getSku')->willReturn($row['sku']);
+            $reservation->method('getQuantity')->willReturn($row['qty']);
+            $reservation->method('getStockId')->willReturn($row['stock']);
+            $reservation->method('getMetadata')->willReturn(json_encode($row['metadata']));
+            $built = $row;
+            $row = [];
+            $this->written[] = $built;
+            return $reservation;
+        });
+        $writer = $this->createMock(AppendReservationsInterface::class);
+        $writer->method('execute')->willReturnCallback(function (array $reservations): void {
+            $this->appends++;
+        });
+        $events = $this->createMock(SalesEventInterfaceFactory::class);
+        $events->method('create')->willReturnCallback(function (array $data): SalesEventInterface {
+            $event = $this->createMock(SalesEventInterface::class);
+            $event->method('getType')->willReturn($data['type']);
+            $event->method('getObjectType')->willReturn($data['objectType']);
+            $event->method('getObjectId')->willReturn($data['objectId']);
+            return $event;
+        });
+        $incrementId = null;
+        $extensions = $this->createMock(SalesEventExtensionFactory::class);
+        $extensions->method('create')->willReturnCallback(function (array $arguments) use (&$incrementId): SalesEventExtensionInterface {
+            $incrementId = $arguments['data']['objectIncrementId'];
+            return $this->createMock(SalesEventExtensionInterface::class);
+        });
+        $converter = $this->createMock(SalesEventToArrayConverter::class);
+        $converter->method('execute')->willReturnCallback(static function (SalesEventInterface $event) use (&$incrementId): array {
+            return [
+                'event_type' => $event->getType(),
+                'object_type' => $event->getObjectType(),
+                'object_id' => $event->getObjectId(),
+                'object_increment_id' => $incrementId ?? '',
+            ];
+        });
+        $productTypes = $this->createMock(GetProductTypesBySkusInterface::class);
+        $productTypes->method('execute')->willReturnCallback(
+            static fn (array $skus): array => array_intersect_key($types + array_fill_keys($skus, 'simple'), array_flip($skus)) + ($types === [] ? array_fill_keys($skus, 'simple') : [])
+        );
+        if ($types !== []) {
+            $productTypes = $this->createMock(GetProductTypesBySkusInterface::class);
+            $productTypes->method('execute')->willReturnCallback(static fn (array $skus): array => array_intersect_key($types, array_flip($skus)));
+        }
+        $allowed = $this->createMock(IsSourceItemManagementAllowedForProductTypeInterface::class);
+        $allowed->method('execute')->willReturnCallback(static fn (string $type): bool => $managed === null || $managed($type));
+        $remaining = $this->createMock(RemainingInconsistency::class);
+        $remaining->method('forOrderSku')->willReturnCallback(
+            static fn (object $order, string $sku, int $stockId): array => [
+                'expected' => $remainingBySku[$sku] ?? 0.0,
+                'actual' => 0.0,
+                'remaining' => $remainingBySku[$sku] ?? 0.0,
+            ]
+        );
+        return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining);
     }
 
     /**
@@ -122,84 +239,11 @@ class InventoryHandlerTest extends TestCase
         return $kinds;
     }
 
-    /**
-     * The handler over Inventory's sales-event service and its factories, recording what is placed, with each sku's remainder on stock 2 as given.
-     *
-     * @param array<string, float> $remainingBySku
-     */
-    private function handler(array $remainingBySku): InventoryHandler
-    {
-        $incrementId = null;
-        $place = $this->createMock(PlaceReservationsForSalesEventInterface::class);
-        $place->method('execute')->willReturnCallback(
-            function (array $items, SalesChannelInterface $channel, SalesEventInterface $event) use (&$incrementId): void {
-                $this->placed[] = [
-                    array_map(static fn (ItemToSellInterface $item): array => ['sku' => $item->getSku(), 'qty' => $item->getQuantity()], $items),
-                    ['type' => $channel->getType(), 'code' => $channel->getCode()],
-                    [
-                        'type' => $event->getType(),
-                        'objectType' => $event->getObjectType(),
-                        'objectId' => $event->getObjectId(),
-                        'objectIncrementId' => $incrementId,
-                    ],
-                ];
-            }
-        );
-        $items = $this->createMock(ItemToSellInterfaceFactory::class);
-        $items->method('create')->willReturnCallback(function (array $data): ItemToSellInterface {
-            $item = $this->createMock(ItemToSellInterface::class);
-            $item->method('getSku')->willReturn($data['sku']);
-            $item->method('getQuantity')->willReturn($data['qty']);
-            return $item;
-        });
-        $channels = $this->createMock(SalesChannelInterfaceFactory::class);
-        $channels->method('create')->willReturnCallback(function (array $arguments): SalesChannelInterface {
-            $channel = $this->createMock(SalesChannelInterface::class);
-            $channel->method('getType')->willReturn($arguments['data']['type']);
-            $channel->method('getCode')->willReturn($arguments['data']['code']);
-            return $channel;
-        });
-        $events = $this->createMock(SalesEventInterfaceFactory::class);
-        $events->method('create')->willReturnCallback(function (array $data): SalesEventInterface {
-            $event = $this->createMock(SalesEventInterface::class);
-            $event->method('getType')->willReturn($data['type']);
-            $event->method('getObjectType')->willReturn($data['objectType']);
-            $event->method('getObjectId')->willReturn($data['objectId']);
-            return $event;
-        });
-        $extensions = $this->createMock(SalesEventExtensionFactory::class);
-        $extensions->method('create')->willReturnCallback(function (array $arguments) use (&$incrementId): SalesEventExtensionInterface {
-            $incrementId = $arguments['data']['objectIncrementId'];
-            return $this->createMock(SalesEventExtensionInterface::class);
-        });
-        $remaining = $this->createMock(RemainingInconsistency::class);
-        $remaining->method('forOrderSku')->willReturnCallback(
-            static fn (object $order, string $sku, int $stockId): array => [
-                'expected' => $remainingBySku[$sku] ?? 0.0,
-                'actual' => 0.0,
-                'remaining' => $remainingBySku[$sku] ?? 0.0,
-            ]
-        );
-        return new InventoryHandler($place, $items, $channels, $events, $extensions, $this->websites('base'), $remaining);
-    }
-
-    private function websites(string $code): WebsiteRepositoryInterface
-    {
-        $website = $this->createMock(WebsiteInterface::class);
-        $website->method('getCode')->willReturn($code);
-        $repository = $this->createMock(WebsiteRepositoryInterface::class);
-        $repository->method('getById')->willReturn($website);
-        return $repository;
-    }
-
     private function order(int $id, string $increment): Order
     {
-        $store = $this->createMock(StoreInterface::class);
-        $store->method('getWebsiteId')->willReturn(1);
-        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()->onlyMethods(['getEntityId', 'getIncrementId', 'getStore'])->getMock();
+        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()->onlyMethods(['getEntityId', 'getIncrementId'])->getMock();
         $order->method('getEntityId')->willReturn($id);
         $order->method('getIncrementId')->willReturn($increment);
-        $order->method('getStore')->willReturn($store);
         return $order;
     }
 }
