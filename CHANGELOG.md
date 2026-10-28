@@ -4,7 +4,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## 0.1.0 (2026-10-28)
+## Unreleased
 
 ### Fixed
 * A reservation row naming an order entity id counts for that order only. Rows were matched on the entity id or the increment id, and Magento keeps increment ids unique per store only, so an order of another store with the same increment id had this order's reservation counted as its own and ended balanced with none written. A row naming no entity id is matched by its increment id only while a single order carries it; when several do, the sku is refused, for the registration and for a compensation, instead of being registered as if the row were not there, which could reserve the quantity twice.
@@ -13,7 +13,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 * What an order owes is read per product, as Magento's placement resolves a line (`GetSkuFromOrderItem`) and as the core recorded the row: the catalog's sku and type for the line's product id. A grouped product's child (line type `grouped`, which Inventory does not manage) and a product with custom options (a line sku such as `SHIRT-engr`) were read as owing nothing, so their registration ended balanced with no reservation written, and a compensation for them was refused as already balanced.
 
 ### Changed
-* `composer.json` declares no `version`; the package's version is its git tag, as the core's is. `dev-main` is aliased as `1.0.x-dev`, as in the core.
+* `composer.json` aliases `dev-main` as `0.1.x-dev`, the series the package requires the core at.
+
+## 0.1.0 (2026-10-28)
 
 ### Added
 * The package: the Magento Inventory half of `hyva-themes/magento2-inventory-order-reservation`, as its own module sequenced on the Inventory modules, so every constructor names the Inventory interface it needs and a store without Inventory never installs it. It holds the inventory handler (the `order_placed` reservation for what each sku still owes), the coordinated compensation and the three plugins on Magento's repair tools: the compensation writer, the inconsistency listing and the compensation command.
