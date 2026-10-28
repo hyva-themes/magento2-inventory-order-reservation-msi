@@ -13,6 +13,7 @@ use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
 use Magento\Framework\App\ResourceConnection;
 use Magento\InventoryConfigurationApi\Api\GetStockItemConfigurationInterface;
 use Magento\InventoryConfigurationApi\Model\IsSourceItemManagementAllowedForProductTypeInterface;
+use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservation\Model\ResourceModel\WebsiteStock;
 use Magento\InventoryConfigurationApi\Api\Data\StockItemConfigurationInterface;
 use Magento\Store\Api\Data\StoreInterface;
@@ -114,6 +115,46 @@ class RemainingInconsistencyTest extends TestCase
         self::assertSame(-0.0, $service->expectedSum($this->order(Order::STATE_PROCESSING, [$parent, $child]), 'shirt-red'));
     }
 
+    #[Test]
+    public function a_line_with_custom_options_counts_under_its_products_sku(): void
+    {
+        // the line's sku carries the option's suffix; the reservation and the record name the product's
+        $order = $this->order(Order::STATE_PROCESSING, [$this->item('SHIRT-engr', 'simple', 2, 0, 0, 0, 0, false, productId: 10)]);
+        $service = $this->service($this->managing(['simple']), [10 => ['sku' => 'SHIRT', 'type' => 'simple']]);
+
+        self::assertSame(-2.0, $service->expectedSum($order, 'SHIRT'));
+        self::assertSame(0.0, $service->expectedSum($order, 'SHIRT-engr'), 'no stock is kept under the line\'s own sku');
+    }
+
+    #[Test]
+    public function a_grouped_products_child_counts_under_its_own_product(): void
+    {
+        // Magento saves a grouped product's child line with the type "grouped"
+        $order = $this->order(Order::STATE_PROCESSING, [$this->item('chair', 'grouped', 3, 0, 0, 1, 0, false, productId: 11)]);
+        $service = $this->service($this->managing(['simple']), [11 => ['sku' => 'chair', 'type' => 'simple']]);
+
+        self::assertSame(-2.0, $service->expectedSum($order, 'chair'));
+    }
+
+    #[Test]
+    public function a_grouped_line_whose_product_is_gone_counts_as_magentos_listing_counts_it(): void
+    {
+        $order = $this->order(Order::STATE_PROCESSING, [$this->item('chair', 'grouped', 3, 0, 0, 0, 0, false, productId: 12)]);
+
+        self::assertSame(-3.0, $this->service($this->managing(['simple']))->expectedSum($order, 'chair'));
+    }
+
+    #[Test]
+    public function a_composite_parent_line_is_left_to_its_child_by_the_catalogs_type(): void
+    {
+        // a configurable parent line carries its child's sku; the catalog names its product configurable
+        $parent = $this->item('shirt-blue', 'configurable', 2.0, 0.0, 0.0, 0.0, 0.0, false, productId: 20);
+        $child = $this->item('shirt-blue', 'simple', 2.0, 0.0, 0.0, 0.0, 0.0, false, productId: 21);
+        $service = $this->service(null, [20 => ['sku' => 'shirt', 'type' => 'configurable'], 21 => ['sku' => 'shirt-blue', 'type' => 'simple']]);
+
+        self::assertSame(-2.0, $service->expectedSum($this->order(Order::STATE_PROCESSING, [$parent, $child]), 'shirt-blue'));
+    }
+
     private function managing(array $types): object
     {
         return new class($types) {
@@ -131,7 +172,10 @@ class RemainingInconsistencyTest extends TestCase
     /**
      * The service over a store whose source-item management rule is the given object's `execute(string $type): bool`; every type managed without one.
      */
-    private function service(?object $managed = null): RemainingInconsistency
+    /**
+     * @param array<int, array{sku: string, type: string}> $catalog what the catalog holds by product id
+     */
+    private function service(?object $managed = null, array $catalog = []): RemainingInconsistency
     {
         $allowed = $this->createMock(IsSourceItemManagementAllowedForProductTypeInterface::class);
         $allowed->method('execute')->willReturnCallback(
@@ -147,15 +191,20 @@ class RemainingInconsistencyTest extends TestCase
         $website->method('getCode')->willReturn('base');
         $websites = $this->createMock(WebsiteRepositoryInterface::class);
         $websites->method('getById')->with(1)->willReturn($website);
-        return new RemainingInconsistency($this->createMock(ResourceConnection::class), $allowed, $configuration, $websiteStock, $websites);
+        $products = $this->createStub(ProductIdentities::class);
+        $products->method('byProductIds')->willReturnCallback(
+            static fn (array $ids): array => array_intersect_key($catalog, array_flip($ids))
+        );
+        return new RemainingInconsistency($this->createStub(ResourceConnection::class), $allowed, $configuration, $websiteStock, $websites, $products);
     }
 
-    private function item(string $sku, string $type, float $ordered, float $canceled, float $refunded, float $shipped, float $invoiced, bool $virtual): Item
+    private function item(string $sku, string $type, float $ordered, float $canceled, float $refunded, float $shipped, float $invoiced, bool $virtual, ?int $productId = null): Item
     {
         $item = $this->getMockBuilder(Item::class)->disableOriginalConstructor()
-            ->onlyMethods(['getSku', 'getProductType', 'getQtyOrdered', 'getQtyCanceled', 'getQtyRefunded', 'getQtyShipped', 'getQtyInvoiced', 'getIsVirtual'])
+            ->onlyMethods(['getSku', 'getProductType', 'getProductId', 'getQtyOrdered', 'getQtyCanceled', 'getQtyRefunded', 'getQtyShipped', 'getQtyInvoiced', 'getIsVirtual'])
             ->getMock();
         $item->method('getSku')->willReturn($sku);
+        $item->method('getProductId')->willReturn($productId);
         $item->method('getProductType')->willReturn($type);
         $item->method('getQtyOrdered')->willReturn($ordered);
         $item->method('getQtyCanceled')->willReturn($canceled);

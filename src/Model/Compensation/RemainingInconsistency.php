@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Hyva\InventoryOrderReservationMsi\Model\Compensation;
 
+use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservation\Model\ResourceModel\WebsiteStock;
 use Magento\Catalog\Model\Product\Type\AbstractType;
 use Magento\Framework\App\ResourceConnection;
@@ -33,15 +34,28 @@ use Magento\Store\Api\WebsiteRepositoryInterface;
  * on any stock that matters to it: the stock it was recorded on, the
  * stock the website sells from now, and every stock holding a row for
  * the order and sku.
+ *
+ * A line is counted under the product that holds its stock, as Magento's
+ * placement resolves it (GetSkuFromOrderItem) and as the core's recorder
+ * recorded the row: the catalog's sku and type for the line's product id.
+ * A line with custom options carries a sku of its own ("SHIRT-engr"), a
+ * grouped product's child carries the type "grouped", and a composite
+ * parent line carries its child's sku; read by the product, each lands
+ * where its reservation does. A line whose product the catalog no longer
+ * holds keeps its own sku and type, with "grouped" counted as Magento's
+ * listing counts it.
  */
 class RemainingInconsistency
 {
+    private const GROUPED = 'grouped';
+
     public function __construct(
         private readonly ResourceConnection $resourceConnection,
         private readonly IsSourceItemManagementAllowedForProductTypeInterface $managementAllowed,
         private readonly GetStockItemConfigurationInterface $stockItemConfiguration,
         private readonly WebsiteStock $websiteStock,
-        private readonly WebsiteRepositoryInterface $websiteRepository
+        private readonly WebsiteRepositoryInterface $websiteRepository,
+        private readonly ProductIdentities $products
     ) {
     }
 
@@ -98,13 +112,24 @@ class RemainingInconsistency
         if (!$this->isManaged($sku, $stockId)) {
             return 0.0;
         }
+        $items = $order->getItems();
+        $identities = $this->products->byProductIds(array_map(static fn (OrderItemInterface $item): int => (int) $item->getProductId(), $items));
         $qty = 0.0;
-        foreach ($order->getItems() as $item) {
-            if ((string) $item->getSku() !== $sku) {
-                continue;
+        foreach ($items as $item) {
+            $identity = $identities[(int) $item->getProductId()] ?? null;
+            if ($identity !== null) {
+                if ($identity['sku'] !== $sku || ProductIdentities::isComposite($identity['type'])) {
+                    continue;
+                }
+                $type = $identity['type'];
+            } else {
+                if ((string) $item->getSku() !== $sku) {
+                    continue;
+                }
+                $type = (string) $item->getProductType();
             }
-            $type = (string) $item->getProductType();
-            if ($type !== '' && !$this->managementAllowed->execute($type)) {
+            // Magento's listing counts a grouped product's child under the line type "grouped"
+            if ($type !== '' && $type !== self::GROUPED && !$this->managementAllowed->execute($type)) {
                 continue;
             }
             $progress = $this->progress($item);
