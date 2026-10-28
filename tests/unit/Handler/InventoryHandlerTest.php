@@ -151,9 +151,10 @@ class InventoryHandlerTest extends TestCase
     {
         // a reservation names only the order number, which another store's order carries too;
         // counted for neither order, the row would read as owing the whole quantity
-        $handler = $this->handler(['mug' => -2.0, 'cup' => -1.0], ambiguousSkus: ['mug']);
+        $this->reserve(2, 'mug', -2.0, null, '000000009');
+        $handler = $this->handler([], remaining: $this->remainingOver(ordersByIncrementId: ['000000009' => 2]));
 
-        $outcomes = $handler->register($this->order(9, '000000009'), [
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'mug', 2.0], [11, 'cup', 1.0]]), [
             new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY),
             new Obligation(9, 'cup', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY),
         ]);
@@ -162,6 +163,34 @@ class InventoryHandlerTest extends TestCase
         self::assertStringContainsString('names only the order number 000000009', $outcomes[0]->reason);
         self::assertStringContainsString('inventory:order-reservation:settle 9', $outcomes[0]->reason);
         self::assertSame(['cup'], array_column($this->written, 'sku'), 'the other row is placed, mug is not');
+    }
+
+    public function test_a_row_naming_only_an_order_number_no_other_order_carries_counts_for_the_order(): void
+    {
+        // Magento's writers name the entity id; a row that names only the order number counts while the number is unique
+        $this->reserve(2, 'mug', -2.0, null, '000000009');
+        $handler = $this->handler([], remaining: $this->remainingOver());
+
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'mug', 2.0]]), [
+            new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY),
+        ]);
+
+        self::assertSame(['mug' => 'balanced'], $this->kinds($outcomes));
+        self::assertSame(0, $this->appends);
+    }
+
+    public function test_another_stores_order_with_the_same_number_does_not_lend_this_order_its_reservation(): void
+    {
+        // order 12 of another store carries the same number; its placement names its entity id
+        $this->reserve(2, 'mug', -2.0, 12, '000000009');
+        $handler = $this->handler([], remaining: $this->remainingOver(ordersByIncrementId: ['000000009' => 2]));
+
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'mug', 2.0]]), [
+            new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY),
+        ]);
+
+        self::assertSame(['mug' => 'placed'], $this->kinds($outcomes));
+        self::assertSame([['sku' => 'mug', 'qty' => -2.0, 'stock' => 2]], $this->placements());
     }
 
     public function test_a_row_whose_product_keeps_its_sku_is_placed(): void
@@ -301,7 +330,6 @@ class InventoryHandlerTest extends TestCase
         ?callable $managed = null,
         array $remaindersBySku = [],
         int $currentStock = 2,
-        array $ambiguousSkus = [],
         ?RemainingInconsistency $remaining = null
     ): InventoryHandler {
         $builder = $this->createStub(ReservationBuilderInterface::class);
@@ -379,9 +407,6 @@ class InventoryHandlerTest extends TestCase
             static fn (object $order, string $sku, int $recordedStock): array => $remaindersBySku[$sku] ?? [$recordedStock => $remainingBySku[$sku] ?? 0.0]
         );
         $remaining->method('currentStockId')->willReturn($currentStock);
-        $remaining->method('hasAmbiguousRows')->willReturnCallback(
-            static fn (object $order, string $sku): bool => in_array($sku, $ambiguousSkus, true)
-        );
         return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining);
     }
 

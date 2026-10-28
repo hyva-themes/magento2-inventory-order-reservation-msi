@@ -226,14 +226,22 @@ class CoordinatedCompensationTest extends TestCase
 
     public function test_a_compensation_is_refused_while_a_reservation_of_an_ambiguous_order_number_exists(): void
     {
+        $this->reserve(2, 'mug', -1.0, null, '000000009');
         $obligations = $this->refusedRows();
         $obligations->expects(self::never())->method('markRowDone');
-        $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 0), obligations: $obligations, ambiguous: true);
+        $service = $this->service(
+            registrationRan: false,
+            remaining: -1.0,
+            writer: $this->writer(expectRows: 0),
+            remainingService: $this->remainingOver(ordersByIncrementId: ['000000009' => 2]),
+            obligations: $obligations,
+            order: $this->openOrder(9, '000000009', [[10, 'mug', 1.0]])
+        );
 
         $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
 
         self::assertTrue($outcome->isRefused());
-        self::assertStringContainsString('names only the order number', $outcome->reason);
+        self::assertStringContainsString('names only the order number 000000009', $outcome->reason);
     }
 
     public function test_a_refused_row_is_judged_without_registering_the_orders_other_rows(): void
@@ -409,7 +417,6 @@ class CoordinatedCompensationTest extends TestCase
         ?Obligation $obligation = null,
         ?ObligationResource $obligations = null,
         ?StockRegistration $registration = null,
-        bool $ambiguous = false,
         ?OrderInterface $order = null
     ): CoordinatedCompensation {
         $mutex = $this->createStub(OrderMutexInterface::class);
@@ -423,7 +430,6 @@ class CoordinatedCompensationTest extends TestCase
         if ($remainingService === null) {
             $remainingService = $this->createStub(RemainingInconsistency::class);
             $remainingService->method('forOrderSku')->willReturn(['expected' => $remaining, 'actual' => 0.0, 'remaining' => $remaining]);
-            $remainingService->method('hasAmbiguousRows')->willReturn($ambiguous);
             // after a write of the whole remainder nothing is left on the one stock; a partial write leaves the rest
             $remainingService->method('remaindersForRow')->willReturnCallback(
                 static fn (): array => [2 => $remaining + 1.0 < -Obligation::TOLERANCE ? round($remaining + 1.0, 4) : 0.0]
