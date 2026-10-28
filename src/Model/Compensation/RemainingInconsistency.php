@@ -217,7 +217,7 @@ class RemainingInconsistency
     }
 
     /**
-     * The stocks holding a row for the order and sku, whichever spelling of the order's id the writer used.
+     * The stocks holding a row for the order and sku (rowsOfOrder()).
      *
      * @return int[]
      */
@@ -238,31 +238,58 @@ class RemainingInconsistency
             ->from($table, ['stock_id'])
             ->where('stock_id IN (?)', array_map('intval', $stockIds))
             ->where('sku = ?', $sku)
-            ->where(
-                "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id')) = " . $connection->quote((string) $orderId)
-                . " OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = " . $connection->quote($incrementId)
-            );
+            ->where($this->rowsOfOrder($orderId, $incrementId));
         return array_map('intval', $connection->fetchCol($select));
     }
 
     /**
-     * The sum of the reservation rows on record for the order and sku on the stock, whichever spelling of the order's id the writer used.
+     * The sum of the reservation rows on record for the order and sku on the stock (rowsOfOrder()).
      */
     private function actualSum(int $orderId, string $incrementId, string $sku, int $stockId): float
     {
         $connection = $this->resourceConnection->getConnection();
         $table = $this->resourceConnection->getTableName('inventory_reservation');
-        // the writers spell the order's id as a string or a number, and some
-        // name the increment id; read as JSON, so an id that is a prefix of
-        // another, or holds a character the JSON escapes, matches itself only
         $select = $connection->select()
             ->from($table, ['total' => 'COALESCE(SUM(quantity), 0)'])
             ->where('sku = ?', $sku)
             ->where('stock_id = ?', $stockId)
-            ->where(
-                "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id')) = " . $connection->quote((string) $orderId)
-                . " OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = " . $connection->quote($incrementId)
-            );
+            ->where($this->rowsOfOrder($orderId, $incrementId));
         return (float) $connection->fetchOne($select);
+    }
+
+    /**
+     * The condition on inventory_reservation.metadata that picks the order's own rows.
+     *
+     * A row naming an order entity id (every writer of Magento's does, as a
+     * string or a number) belongs to that order alone, so another store's
+     * order with the same increment id never counts here: Magento keeps an
+     * increment id unique per store only. A row naming no entity id is
+     * matched by its increment id, and only while no other order carries
+     * that increment id; an ambiguous one is counted for neither order.
+     * Read as JSON, so an id that is a prefix of another, or holds a
+     * character the JSON escapes, matches itself only.
+     */
+    private function rowsOfOrder(int $orderId, string $incrementId): string
+    {
+        $connection = $this->resourceConnection->getConnection();
+        $objectId = "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id'))";
+        $condition = $objectId . ' = ' . $connection->quote((string) $orderId);
+        if ($incrementId !== '' && $this->isUniqueIncrementId($incrementId)) {
+            $condition .= " OR (COALESCE($objectId, '') IN ('', '0', 'null')"
+                . " AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = " . $connection->quote($incrementId) . ')';
+        }
+        return $condition;
+    }
+
+    /**
+     * Whether a single order carries the increment id, across every store.
+     */
+    private function isUniqueIncrementId(string $incrementId): bool
+    {
+        $connection = $this->resourceConnection->getConnection('sales');
+        $select = $connection->select()
+            ->from($this->resourceConnection->getTableName('sales_order'), ['count' => 'COUNT(*)'])
+            ->where('increment_id = ?', $incrementId);
+        return (int) $connection->fetchOne($select) <= 1;
     }
 }
