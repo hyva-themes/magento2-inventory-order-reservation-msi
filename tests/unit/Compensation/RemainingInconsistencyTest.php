@@ -201,6 +201,44 @@ class RemainingInconsistencyTest extends TestCase
     }
 
     #[Test]
+    public function within_a_memoized_call_a_rows_repeated_reads_run_once(): void
+    {
+        // rows on stocks 1 and 3; the website sells from stock 2: three stocks to read
+        $this->reserve(1, 'mug', 1.0, 9);
+        $this->reserve(3, 'mug', -1.0, 9);
+        $service = $this->remainingOver([10 => ['sku' => 'mug', 'type' => 'simple']]);
+        $order = $this->openOrder(9, '000000009', [[10, 'mug', 2.0]]);
+        $row = new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10);
+
+        $remainders = $service->memoized(static function () use ($service, $order, $row): array {
+            self::assertNull($service->rename($order, $row));
+            self::assertFalse($service->hasAmbiguousRows($order, 'mug'));
+            return $service->remaindersForRow($order, 'mug', 2, 10);
+        });
+
+        self::assertSame([1 => -1.0, 2 => -2.0, 3 => 1.0], $remainders);
+        self::assertSame(1, $this->queries['orders by increment id'], 'the order number\'s uniqueness');
+        self::assertSame(1, $this->queries['stocks with rows'], 'the stocks holding reservations');
+        self::assertSame(1, $this->queries['products'], 'the catalog\'s identities');
+        self::assertSame(3, $this->queries['sum'], 'one sum per stock');
+    }
+
+    #[Test]
+    public function the_memo_ends_with_its_call(): void
+    {
+        $this->reserve(2, 'mug', -2.0, 9);
+        $service = $this->remainingOver([10 => ['sku' => 'mug', 'type' => 'simple']]);
+        $order = $this->openOrder(9, '000000009', [[10, 'mug', 2.0]]);
+
+        $service->memoized(static fn (): array => $service->remaindersForRow($order, 'mug', 2, 10));
+        $service->memoized(static fn (): array => $service->remaindersForRow($order, 'mug', 2, 10));
+        $service->remaindersForRow($order, 'mug', 2, 10);
+
+        self::assertSame(3, $this->queries['stocks with rows'], 'read again by each call');
+        self::assertSame(1 + 1 + 2, $this->queries['orders by increment id'], 'once per memoized call, per query outside one');
+    }
+
+    #[Test]
     public function a_row_with_a_product_id_ignores_a_composite_parent_line(): void
     {
         $parent = $this->item('shirt-blue', 'configurable', 2.0, 0.0, 0.0, 0.0, 0.0, false, productId: 20);

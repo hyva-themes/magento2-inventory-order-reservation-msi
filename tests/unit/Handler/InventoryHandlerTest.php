@@ -175,6 +175,22 @@ class InventoryHandlerTest extends TestCase
         self::assertSame(['mug' => 'placed'], $this->kinds($outcomes));
     }
 
+    public function test_the_orders_reads_run_once_for_all_its_rows(): void
+    {
+        $this->reserve(1, 'cup', 1.0, 7);
+        $handler = $this->handler([], remaining: $this->remainingOver([10 => ['sku' => 'mug', 'type' => 'simple'], 11 => ['sku' => 'cup', 'type' => 'simple']]));
+
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'mug', 2.0], [11, 'cup', 1.0]]), [
+            new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10),
+            new Obligation(9, 'cup', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY, productId: 11),
+        ]);
+
+        self::assertSame(['mug' => 'placed', 'cup' => 'placed'], $this->kinds($outcomes));
+        self::assertSame(1, $this->queries['orders by increment id']);
+        self::assertSame(1, $this->queries['stocks with rows']);
+        self::assertSame(2, $this->queries['products'], 'each product once');
+    }
+
     public function test_an_order_whose_rows_already_balance_places_nothing(): void
     {
         // shipped, canceled or repaired in full before the registration ran
@@ -358,6 +374,7 @@ class InventoryHandlerTest extends TestCase
             return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining);
         }
         $remaining = $this->createStub(RemainingInconsistency::class);
+        $remaining->method('memoized')->willReturnCallback(static fn (callable $read): mixed => $read());
         $remaining->method('remaindersForRow')->willReturnCallback(
             static fn (object $order, string $sku, int $recordedStock): array => $remaindersBySku[$sku] ?? [$recordedStock => $remainingBySku[$sku] ?? 0.0]
         );

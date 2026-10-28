@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 * What an order owes is read per product, as Magento's placement resolves a line (`GetSkuFromOrderItem`) and as the core recorded the row: the catalog's sku and type for the line's product id. A grouped product's child (line type `grouped`, which Inventory does not manage) and a product with custom options (a line sku such as `SHIRT-engr`) were read as owing nothing, so their registration ended balanced with no reservation written, and a compensation for them was refused as already balanced.
 
 ### Changed
+* The reads a registration and a compensation repeated per row and per stock inside the order's lock (whether the order number is unique, the stocks holding reservations, the catalog's sku and type per product) are read once per registration and once per judgement, and again after a compensation writes.
 * `composer.json` aliases `dev-main` as `0.1.x-dev`, the series the package requires the core at.
 
 ## 0.1.0 (2026-10-28)

@@ -96,38 +96,11 @@ class CoordinatedCompensation
             return $this->refuse($sku, $stockId, $requested, $ran, 'the order\'s stock side is the legacy stock item, not a Magento Inventory stock');
         }
         $order = $this->orderRepository->get($orderId);
-        // a renamed row is judged under the catalog's sku once Magento
-        // Inventory moved the order's reservations there, and refused while
-        // they are split or kept under the recorded sku, as the registration
-        // refuses it
-        $rename = $this->remaining->rename($order, $obligation);
-        if ($rename !== null) {
-            if (!$rename->isFollowed()) {
-                return $this->refuse($sku, $stockId, $requested, $ran, $this->renameRefusal($rename, $orderId));
-            }
-            if ($sku !== $rename->currentSku) {
-                return $this->refuse($sku, $stockId, $requested, $ran, sprintf(
-                    'the product is %1$s in the catalog now and Magento Inventory moved the order\'s reservations to %1$s; a compensation under %1$s repairs the row',
-                    $rename->currentSku
-                ));
-            }
+        // read with the order's reads memoized, before anything is written
+        $remaining = $this->remaining->memoized(fn (): float|Outcome => $this->judge($order, $obligation, $sku, $stockId, $requested, $ran));
+        if ($remaining instanceof Outcome) {
+            return $remaining;
         }
-        if ($this->remaining->hasAmbiguousRows($order, $sku)) {
-            // refused by the registration for the same reason: a row that may
-            // be this order's is counted for none, so the numbers below are not
-            // the order's
-            return $this->refuse($sku, $stockId, $requested, $ran, sprintf(
-                'a reservation names only the order number %s, which orders of several stores carry; inventory:order-reservation:settle %d closes the row once the stock is corrected by hand',
-                (string) $order->getIncrementId(),
-                $orderId
-            ));
-        }
-        // judged on the stock the request names: the order's expectation on
-        // the stock the website sells from now, zero elsewhere, less the rows
-        // on that stock; a stock the order expects nothing on and holds no
-        // row on is balanced, which keeps a compensation off a stock the
-        // order has nothing to do with
-        $remaining = $this->remaining->forOrderSku($order, $sku, $stockId, $obligation->productId)['remaining'];
         if (abs($remaining) < Obligation::TOLERANCE) {
             return new Outcome(Outcome::ALREADY_BALANCED, $sku, $stockId, $requested, 0.0, 0.0, $ran);
         }
@@ -170,11 +143,51 @@ class CoordinatedCompensation
     }
 
     /**
+     * What remains on the stock the request names, or the refusal of a renamed or ambiguous row.
+     */
+    private function judge(OrderInterface $order, Obligation $obligation, string $sku, int $stockId, float $requested, bool $ran): float|Outcome
+    {
+        // a renamed row is judged under the catalog's sku once Magento
+        // Inventory moved the order's reservations there, and refused while
+        // they are split or kept under the recorded sku, as the registration
+        // refuses it
+        $rename = $this->remaining->rename($order, $obligation);
+        if ($rename !== null) {
+            if (!$rename->isFollowed()) {
+                return $this->refuse($sku, $stockId, $requested, $ran, $this->renameRefusal($rename, $obligation->orderId));
+            }
+            if ($sku !== $rename->currentSku) {
+                return $this->refuse($sku, $stockId, $requested, $ran, sprintf(
+                    'the product is %1$s in the catalog now and Magento Inventory moved the order\'s reservations to %1$s; a compensation under %1$s repairs the row',
+                    $rename->currentSku
+                ));
+            }
+        }
+        if ($this->remaining->hasAmbiguousRows($order, $sku)) {
+            // refused by the registration for the same reason: a row that may
+            // be this order's is counted for none, so the numbers below are not
+            // the order's
+            return $this->refuse($sku, $stockId, $requested, $ran, sprintf(
+                'a reservation names only the order number %s, which orders of several stores carry; inventory:order-reservation:settle %d closes the row once the stock is corrected by hand',
+                (string) $order->getIncrementId(),
+                $obligation->orderId
+            ));
+        }
+        // judged on the stock the request names: the order's expectation on
+        // the stock the website sells from now, zero elsewhere, less the rows
+        // on that stock; a stock the order expects nothing on and holds no
+        // row on is balanced, which keeps a compensation off a stock the
+        // order has nothing to do with
+        return $this->remaining->forOrderSku($order, $sku, $stockId, $obligation->productId)['remaining'];
+    }
+
+    /**
      * Whether nothing remains for the row on any stock that matters to it, read again after the write.
      */
     private function balancedEverywhere(OrderInterface $order, string $sku, int $recordedStockId, ?int $productId): bool
     {
-        foreach ($this->remaining->remaindersForRow($order, $sku, $recordedStockId, $productId) as $remaining) {
+        $remainders = $this->remaining->memoized(fn (): array => $this->remaining->remaindersForRow($order, $sku, $recordedStockId, $productId));
+        foreach ($remainders as $remaining) {
             if (abs($remaining) >= Obligation::TOLERANCE) {
                 return false;
             }

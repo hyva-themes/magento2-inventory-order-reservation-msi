@@ -22,6 +22,7 @@ use Magento\InventoryReservationsApi\Model\ReservationInterface;
 use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
 use Magento\Sales\Model\OrderMutexInterface;
+use PHPUnit\Framework\MockObject\Stub;
 use PHPUnit\Framework\TestCase;
 
 class CoordinatedCompensationTest extends TestCase
@@ -151,6 +152,7 @@ class CoordinatedCompensationTest extends TestCase
 
         self::assertSame(Outcome::APPLIED, $outcome->kind);
         self::assertSame('NEW', $outcome->sku);
+        self::assertSame(2, $this->queries['stocks with rows'], 'once for the judgement, once again after the write');
     }
 
     public function test_a_compensation_under_the_recorded_sku_of_a_followed_rename_names_the_new_sku(): void
@@ -426,6 +428,9 @@ class CoordinatedCompensationTest extends TestCase
             $remainingService->method('remaindersForRow')->willReturnCallback(
                 static fn (): array => [2 => $remaining + 1.0 < -Obligation::TOLERANCE ? round($remaining + 1.0, 4) : 0.0]
             );
+        }
+        if ($remainingService instanceof Stub) {
+            $remainingService->method('memoized')->willReturnCallback(static fn (callable $read): mixed => $read());
         }
         if ($obligations === null) {
             // the named row is read first: owed when the registration is to

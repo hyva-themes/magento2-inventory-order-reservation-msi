@@ -55,6 +55,12 @@ class RemainingInconsistency
     /** The setting under which Magento Inventory moves reservations to a renamed sku (UpdateReservationsPlugin). */
     private const XML_PATH_SYNCHRONIZE_WITH_CATALOG = 'cataloginventory/options/synchronize_with_catalog';
 
+    /**
+     * @var array{unique: array<string, bool>, stocks: int[]|null, products: array<int, array{sku: string, type: string}|null>}|null
+     *      the reads of the running memoized() call, null outside one
+     */
+    private ?array $memo = null;
+
     public function __construct(
         private readonly ResourceConnection $resourceConnection,
         private readonly IsSourceItemManagementAllowedForProductTypeInterface $managementAllowed,
@@ -64,6 +70,29 @@ class RemainingInconsistency
         private readonly ProductIdentities $products,
         private readonly ScopeConfigInterface $scopeConfig
     ) {
+    }
+
+    /**
+     * Runs $read with the reads it repeats per row and per stock memoized for its duration: whether an order number is unique, the stocks holding reservations, the catalog's sku and type per product.
+     *
+     * A caller holds the order's lock and writes nothing within the call,
+     * so these stay as read; the memo ends with the call, and a read after
+     * a write goes to the database again. A call within a call has a memo
+     * of its own.
+     *
+     * @template T
+     * @param callable(): T $read
+     * @return T
+     */
+    public function memoized(callable $read): mixed
+    {
+        $outer = $this->memo;
+        $this->memo = ['unique' => [], 'stocks' => null, 'products' => []];
+        try {
+            return $read();
+        } finally {
+            $this->memo = $outer;
+        }
     }
 
     /** @return array{expected: float, actual: float, remaining: float}
@@ -83,7 +112,7 @@ class RemainingInconsistency
         if ($row->productId === null) {
             return null;
         }
-        $current = $this->products->byProductIds([$row->productId])[$row->productId]['sku'] ?? null;
+        $current = $this->identities([$row->productId])[$row->productId]['sku'] ?? null;
         return $current !== null && $current !== $row->sku ? $current : null;
     }
 
@@ -155,7 +184,7 @@ class RemainingInconsistency
             return 0.0;
         }
         $items = $order->getItems();
-        $identities = $this->products->byProductIds(array_map(static fn (OrderItemInterface $item): int => (int) $item->getProductId(), $items));
+        $identities = $this->identities(array_map(static fn (OrderItemInterface $item): int => (int) $item->getProductId(), $items));
         $qty = 0.0;
         foreach ($items as $item) {
             $identity = $identities[(int) $item->getProductId()] ?? null;
@@ -315,6 +344,17 @@ class RemainingInconsistency
      */
     private function stockIdsWithRows(): array
     {
+        if ($this->memo !== null) {
+            return $this->memo['stocks'] ??= $this->readStockIdsWithRows();
+        }
+        return $this->readStockIdsWithRows();
+    }
+
+    /**
+     * @return int[]
+     */
+    private function readStockIdsWithRows(): array
+    {
         $connection = $this->resourceConnection->getConnection();
         $table = $this->resourceConnection->getTableName('inventory_reservation');
         return array_map('intval', $connection->fetchCol($connection->select()->distinct()->from($table, ['stock_id'])));
@@ -358,10 +398,40 @@ class RemainingInconsistency
      */
     private function isUniqueIncrementId(string $incrementId): bool
     {
+        if ($this->memo !== null) {
+            return $this->memo['unique'][$incrementId] ??= $this->readIsUniqueIncrementId($incrementId);
+        }
+        return $this->readIsUniqueIncrementId($incrementId);
+    }
+
+    private function readIsUniqueIncrementId(string $incrementId): bool
+    {
         $connection = $this->resourceConnection->getConnection('sales');
         $select = $connection->select()
             ->from($this->resourceConnection->getTableName('sales_order'), ['count' => 'COUNT(*)'])
             ->where('increment_id = ?', $incrementId);
         return (int) $connection->fetchOne($select) <= 1;
+    }
+
+    /**
+     * The catalog's sku and type by product id (ProductIdentities), each product read once within a memoized() call.
+     *
+     * @param array<int|string|null> $productIds
+     * @return array<int, array{sku: string, type: string}>
+     */
+    private function identities(array $productIds): array
+    {
+        if ($this->memo === null) {
+            return $this->products->byProductIds($productIds);
+        }
+        $ids = array_values(array_unique(array_map('intval', $productIds)));
+        $unread = array_values(array_diff($ids, array_keys($this->memo['products'])));
+        if ($unread !== []) {
+            $read = $this->products->byProductIds($unread);
+            foreach ($unread as $id) {
+                $this->memo['products'][$id] = $read[$id] ?? null;
+            }
+        }
+        return array_filter(array_intersect_key($this->memo['products'], array_flip($ids)));
     }
 }

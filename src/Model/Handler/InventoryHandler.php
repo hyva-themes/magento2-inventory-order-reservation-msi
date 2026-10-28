@@ -77,7 +77,49 @@ class InventoryHandler implements HandlerInterface
      */
     public function register(OrderInterface $order, array $owed): array
     {
-        // one answer per row, in the rows' order; what is to be placed is decided first and written in one append
+        // one answer per row, in the rows' order; what is to be placed is
+        // decided first, with the order's reads memoized, and written in one append
+        [$outcomes, $toPlace] = $this->remaining->memoized(fn (): array => $this->decide($order, $owed));
+        if ($toPlace === []) {
+            ksort($outcomes);
+            return array_values($outcomes);
+        }
+        // Magento's own filter, as its placement service applies it: a sku
+        // the catalog does not hold is written, a sku whose type allows no
+        // source-item management is not, and its row is balanced
+        $types = $this->getProductTypesBySkus->execute(array_values(array_map(static fn (array $placement): string => $placement[1], $toPlace)));
+        $metadata = $this->serializer->serialize($this->salesEventToArrayConverter->execute($this->salesEvent($order)));
+        $rows = [];
+        foreach ($toPlace as $index => [$obligation, $sku, $remaining]) {
+            $type = $types[$sku] ?? null;
+            if ($type !== null && !$this->isSourceItemManagementAllowedForProductType->execute((string) $type)) {
+                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
+                continue;
+            }
+            $rows[] = $this->reservationBuilder
+                ->setSku($sku)
+                ->setQuantity($remaining)
+                ->setStockId($obligation->stockId)
+                ->setMetadata($metadata)
+                ->build();
+            $outcomes[$index] = new RowOutcome($obligation, RowOutcome::PLACED, $remaining);
+        }
+        if ($rows !== []) {
+            $this->appendReservations->execute($rows);
+        }
+        ksort($outcomes);
+        return array_values($outcomes);
+    }
+
+    /**
+     * The answer for each row that is not placed, and what is placed for the others, read before anything is written.
+     *
+     * @param Obligation[] $owed
+     * @return array{0: array<int, RowOutcome>, 1: array<int, array{0: Obligation, 1: string, 2: float}>}
+     *         the outcomes by row index, and the row, the sku and the quantity to place by row index
+     */
+    private function decide(OrderInterface $order, array $owed): array
+    {
         $outcomes = [];
         $toPlace = [];
         foreach ($owed as $index => $obligation) {
@@ -131,35 +173,7 @@ class InventoryHandler implements HandlerInterface
                 remainders: $nonZero
             );
         }
-        if ($toPlace === []) {
-            ksort($outcomes);
-            return array_values($outcomes);
-        }
-        // Magento's own filter, as its placement service applies it: a sku
-        // the catalog does not hold is written, a sku whose type allows no
-        // source-item management is not, and its row is balanced
-        $types = $this->getProductTypesBySkus->execute(array_values(array_map(static fn (array $placement): string => $placement[1], $toPlace)));
-        $metadata = $this->serializer->serialize($this->salesEventToArrayConverter->execute($this->salesEvent($order)));
-        $rows = [];
-        foreach ($toPlace as $index => [$obligation, $sku, $remaining]) {
-            $type = $types[$sku] ?? null;
-            if ($type !== null && !$this->isSourceItemManagementAllowedForProductType->execute((string) $type)) {
-                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
-                continue;
-            }
-            $rows[] = $this->reservationBuilder
-                ->setSku($sku)
-                ->setQuantity($remaining)
-                ->setStockId($obligation->stockId)
-                ->setMetadata($metadata)
-                ->build();
-            $outcomes[$index] = new RowOutcome($obligation, RowOutcome::PLACED, $remaining);
-        }
-        if ($rows !== []) {
-            $this->appendReservations->execute($rows);
-        }
-        ksort($outcomes);
-        return array_values($outcomes);
+        return [$outcomes, $toPlace];
     }
 
     /**
