@@ -43,7 +43,9 @@ use Magento\Store\Api\WebsiteRepositoryInterface;
  * parent line carries its child's sku; read by the product, each lands
  * where its reservation does. A line whose product the catalog no longer
  * holds keeps its own sku and type, with "grouped" counted as Magento's
- * listing counts it.
+ * listing counts it. Given the product id a row was recorded for, the
+ * lines are those of that product, so a sku the catalog renamed since
+ * still finds them.
  */
 class RemainingInconsistency
 {
@@ -61,9 +63,9 @@ class RemainingInconsistency
 
     /** @return array{expected: float, actual: float, remaining: float}
      */
-    public function forOrderSku(OrderInterface $order, string $sku, int $stockId): array
+    public function forOrderSku(OrderInterface $order, string $sku, int $stockId, ?int $productId = null): array
     {
-        $expected = $this->expectedSum($order, $sku, $stockId);
+        $expected = $this->expectedSum($order, $sku, $stockId, $productId);
         $actual = $this->actualSum((int) $order->getEntityId(), (string) $order->getIncrementId(), $sku, $stockId);
         return ['expected' => $expected, 'actual' => $actual, 'remaining' => round($expected - $actual, 4)];
     }
@@ -73,7 +75,7 @@ class RemainingInconsistency
      *
      * @return array<int, float> stock id => remaining, ascending by stock id
      */
-    public function remaindersForRow(OrderInterface $order, string $sku, int $recordedStockId): array
+    public function remaindersForRow(OrderInterface $order, string $sku, int $recordedStockId, ?int $productId = null): array
     {
         $stocks = array_unique(array_merge(
             [$recordedStockId, $this->currentStockId($order)],
@@ -82,7 +84,7 @@ class RemainingInconsistency
         sort($stocks);
         $remainders = [];
         foreach ($stocks as $stockId) {
-            $remainders[$stockId] = $this->forOrderSku($order, $sku, $stockId)['remaining'];
+            $remainders[$stockId] = $this->forOrderSku($order, $sku, $stockId, $productId)['remaining'];
         }
         return $remainders;
     }
@@ -99,7 +101,7 @@ class RemainingInconsistency
     /**
      * The reservation sum Magento expects for the sku on this order on a stock: zero in a final state and on any stock but the one the website sells from now, else minus what is ordered and neither canceled, refunded nor shipped (invoiced for a virtual line), for the product types Inventory manages.
      */
-    public function expectedSum(OrderInterface $order, string $sku, ?int $stockId = null): float
+    public function expectedSum(OrderInterface $order, string $sku, ?int $stockId = null, ?int $productId = null): float
     {
         if (in_array((string) $order->getState(), [Order::STATE_COMPLETE, Order::STATE_CLOSED, Order::STATE_CANCELED], true)) {
             return 0.0;
@@ -117,7 +119,15 @@ class RemainingInconsistency
         $qty = 0.0;
         foreach ($items as $item) {
             $identity = $identities[(int) $item->getProductId()] ?? null;
-            if ($identity !== null) {
+            if ($productId !== null) {
+                // the row's own product, whatever the catalog calls it today
+                if ((int) $item->getProductId() !== $productId
+                    || ($identity !== null && ProductIdentities::isComposite($identity['type']))
+                ) {
+                    continue;
+                }
+                $type = $identity['type'] ?? (string) $item->getProductType();
+            } elseif ($identity !== null) {
                 if ($identity['sku'] !== $sku || ProductIdentities::isComposite($identity['type'])) {
                     continue;
                 }

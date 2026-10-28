@@ -99,7 +99,7 @@ class CoordinatedCompensation
         // row on is balanced, which keeps a compensation off a stock the
         // order has nothing to do with
         $order = $this->orderRepository->get($orderId);
-        $remaining = $this->remaining->forOrderSku($order, $sku, $stockId)['remaining'];
+        $remaining = $this->remaining->forOrderSku($order, $sku, $stockId, $obligation->productId)['remaining'];
         if (abs($remaining) < Obligation::TOLERANCE) {
             return new Outcome(Outcome::ALREADY_BALANCED, $sku, $stockId, $requested, 0.0, 0.0, $ran);
         }
@@ -123,7 +123,7 @@ class CoordinatedCompensation
             $this->writing = false;
         }
         $after = round($remaining - $requested, 4);
-        if ($obligation->isRefused() && $this->balancedEverywhere($order, $sku, $obligation->stockId)) {
+        if ($obligation->isRefused() && $this->balancedEverywhere($order, $sku, $obligation->stockId, $obligation->productId)) {
             // the registration refused this row; this compensation settled
             // it, nothing remaining on any stock that matters to it. The
             // order's other skus keep their own state until each is balanced,
@@ -144,9 +144,9 @@ class CoordinatedCompensation
     /**
      * Whether nothing remains for the row on any stock that matters to it, read again after the write.
      */
-    private function balancedEverywhere(OrderInterface $order, string $sku, int $recordedStockId): bool
+    private function balancedEverywhere(OrderInterface $order, string $sku, int $recordedStockId, ?int $productId): bool
     {
-        foreach ($this->remaining->remaindersForRow($order, $sku, $recordedStockId) as $remaining) {
+        foreach ($this->remaining->remaindersForRow($order, $sku, $recordedStockId, $productId) as $remaining) {
             if (abs($remaining) >= Obligation::TOLERANCE) {
                 return false;
             }

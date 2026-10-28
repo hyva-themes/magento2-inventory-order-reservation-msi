@@ -11,6 +11,7 @@ namespace Hyva\InventoryOrderReservationMsi\Test\Unit\Handler;
 
 use Hyva\InventoryOrderReservation\Model\Handler\RowOutcome;
 use Hyva\InventoryOrderReservation\Model\Obligation;
+use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
 use Hyva\InventoryOrderReservationMsi\Model\Handler\InventoryHandler;
 use Magento\Framework\Serialize\Serializer\Json;
@@ -84,6 +85,32 @@ class InventoryHandlerTest extends TestCase
 
         self::assertSame(-2.0, $this->written[0]['qty'], 'the two still missing, not the three ordered');
         self::assertSame(-2.0, $outcomes[0]->placed);
+    }
+
+    public function test_a_row_whose_product_was_renamed_is_refused_not_balanced(): void
+    {
+        // recorded as OLD for product 10, renamed to NEW before the registration ran
+        $handler = $this->handler(['OLD' => 0.0, 'NEW' => 0.0], catalog: [10 => ['sku' => 'NEW', 'type' => 'simple']]);
+
+        $outcomes = $handler->register($this->order(9, '000000009'), [
+            new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10),
+        ]);
+
+        self::assertSame(['OLD' => 'refused'], $this->kinds($outcomes));
+        self::assertStringContainsString('Sku OLD is NEW in the catalog now', $outcomes[0]->reason);
+        self::assertStringContainsString('inventory:order-reservation:settle 9', $outcomes[0]->reason);
+        self::assertSame(0, $this->appends, 'nothing written under either sku');
+    }
+
+    public function test_a_row_whose_product_keeps_its_sku_is_placed(): void
+    {
+        $handler = $this->handler(['mug' => -2.0], catalog: [10 => ['sku' => 'mug', 'type' => 'simple']]);
+
+        $outcomes = $handler->register($this->order(9, '000000009'), [
+            new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10),
+        ]);
+
+        self::assertSame(['mug' => 'placed'], $this->kinds($outcomes));
     }
 
     public function test_an_order_whose_rows_already_balance_places_nothing(): void
@@ -189,7 +216,7 @@ class InventoryHandlerTest extends TestCase
      * @param array<string, array<int, float>> $remaindersBySku the remainders per stock for a sku, when more than one stock matters
      * @param int $currentStock the stock the website sells from now
      */
-    private function handler(array $remainingBySku, array $types = [], ?callable $managed = null, array $remaindersBySku = [], int $currentStock = 2): InventoryHandler
+    private function handler(array $remainingBySku, array $types = [], ?callable $managed = null, array $remaindersBySku = [], int $currentStock = 2, array $catalog = []): InventoryHandler
     {
         $builder = $this->createStub(ReservationBuilderInterface::class);
         $row = [];
@@ -262,7 +289,11 @@ class InventoryHandlerTest extends TestCase
             static fn (object $order, string $sku, int $recordedStock): array => $remaindersBySku[$sku] ?? [$recordedStock => $remainingBySku[$sku] ?? 0.0]
         );
         $remaining->method('currentStockId')->willReturn($currentStock);
-        return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining);
+        $products = $this->createStub(ProductIdentities::class);
+        $products->method('byProductIds')->willReturnCallback(
+            static fn (array $ids): array => array_intersect_key($catalog, array_flip($ids))
+        );
+        return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining, $products);
     }
 
     /**

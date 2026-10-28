@@ -30,6 +30,7 @@ Before writing, we look at every stock that matters for a sku: the stock the ord
 - Nothing is missing anywhere: the sku is done, nothing is written.
 - The only thing missing is on the recorded stock: we place it there.
 - Something is missing on another stock, or the recorded stock holds more than the order owes: we refuse that sku and say which stock is off by how much. `inventory:order-reservation:list` shows the reason, and a manual compensation on the stock named fixes it.
+- The product was renamed in the catalog since the order was recorded: we refuse that sku too. The reservation could belong under the old sku or the new one, and we don't guess. `inventory:order-reservation:settle` closes the row once you have corrected the stock by hand.
 
 The refusal is deliberate. We only write to the recorded stock, and only downward. If the website was moved to another stock between the order and its registration, or a shipment was split over two stocks, completing the order on today's mapping would hide a discrepancy. Refusing keeps it visible until someone compensates it. The other skus of the order are placed in the same run.
 

@@ -12,6 +12,7 @@ namespace Hyva\InventoryOrderReservationMsi\Model\Handler;
 use Hyva\InventoryOrderReservation\Model\Handler\HandlerInterface;
 use Hyva\InventoryOrderReservation\Model\Handler\RowOutcome;
 use Hyva\InventoryOrderReservation\Model\Obligation;
+use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
 use Magento\Framework\Serialize\SerializerInterface;
 use Magento\InventoryCatalogApi\Model\GetProductTypesBySkusInterface;
@@ -64,7 +65,8 @@ class InventoryHandler implements HandlerInterface
         private readonly SerializerInterface $serializer,
         private readonly GetProductTypesBySkusInterface $getProductTypesBySkus,
         private readonly IsSourceItemManagementAllowedForProductTypeInterface $isSourceItemManagementAllowedForProductType,
-        private readonly RemainingInconsistency $remaining
+        private readonly RemainingInconsistency $remaining,
+        private readonly ProductIdentities $products
     ) {
     }
 
@@ -76,6 +78,7 @@ class InventoryHandler implements HandlerInterface
         // one answer per row, in the rows' order; what is to be placed is decided first and written in one append
         $outcomes = [];
         $toPlace = [];
+        $identities = $this->products->byProductIds(array_filter(array_map(static fn (Obligation $row): ?int => $row->productId, $owed)));
         foreach ($owed as $index => $obligation) {
             if ($obligation->qtyOrdered <= 0) {
                 $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
@@ -87,9 +90,24 @@ class InventoryHandler implements HandlerInterface
                 ));
                 continue;
             }
+            $currentSku = $obligation->productId !== null ? ($identities[$obligation->productId]['sku'] ?? null) : null;
+            if ($currentSku !== null && $currentSku !== $obligation->sku) {
+                // renamed since the order was recorded: a reservation under the
+                // recorded sku is one Magento's shipment no longer balances, and
+                // one under the new sku is not what the record says; neither is
+                // this handler's to decide
+                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: (string) __(
+                    'Sku %1 is %2 in the catalog now: the product was renamed after the order was recorded, so nothing is placed. '
+                    . 'inventory:order-reservation:settle %3 closes the row once the stock of %2 is corrected by hand.',
+                    $obligation->sku,
+                    $currentSku,
+                    $obligation->orderId
+                ));
+                continue;
+            }
             // what remains on every stock that matters to the row: the recorded
             // stock, the stock the website sells from now, every stock with a row
-            $remainders = $this->remaining->remaindersForRow($order, $obligation->sku, $obligation->stockId);
+            $remainders = $this->remaining->remaindersForRow($order, $obligation->sku, $obligation->stockId, $obligation->productId);
             $nonZero = array_filter($remainders, static fn (float $remaining): bool => abs($remaining) >= Obligation::TOLERANCE);
             if ($nonZero === []) {
                 $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);

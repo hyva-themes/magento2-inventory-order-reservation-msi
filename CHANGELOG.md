@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 ## 0.1.0 (2026-10-28)
 
 ### Fixed
+* A row whose product the catalog renamed after the order was recorded is refused with the reason, naming `inventory:order-reservation:settle`, instead of being read as owing nothing and marked balanced with no reservation written. The remaining inconsistency of a row is read on the lines of the product the row was recorded for, whatever the catalog calls it now.
 * The lookup of the stocks that hold rows for an order and sku names the stocks that hold reservations (read off the same index), so it reads the reservation table through its index (`stock_id`, `sku`, `quantity`) instead of scanning it, inside the order's lock.
 * What an order owes is read per product, as Magento's placement resolves a line (`GetSkuFromOrderItem`) and as the core recorded the row: the catalog's sku and type for the line's product id. A grouped product's child (line type `grouped`, which Inventory does not manage) and a product with custom options (a line sku such as `SHIRT-engr`) were read as owing nothing, so their registration ended balanced with no reservation written, and a compensation for them was refused as already balanced.
 

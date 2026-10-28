@@ -119,6 +119,27 @@ class RemainingInconsistencyTest extends TestCase
     }
 
     #[Test]
+    public function a_row_finds_its_products_lines_after_the_catalog_renamed_the_product(): void
+    {
+        // recorded as OLD for product 10; the catalog calls it NEW now
+        $order = $this->order(Order::STATE_PROCESSING, [$this->item('OLD', 'simple', 2, 0, 0, 0, 0, false, productId: 10)]);
+        $service = $this->service($this->managing(['simple']), [10 => ['sku' => 'NEW', 'type' => 'simple']]);
+
+        self::assertSame(-2.0, $service->expectedSum($order, 'OLD', null, 10), 'the row\'s product still owes two');
+        self::assertSame(0.0, $service->expectedSum($order, 'OLD'), 'by sku alone the renamed line is not found');
+    }
+
+    #[Test]
+    public function a_row_with_a_product_id_ignores_a_composite_parent_line(): void
+    {
+        $parent = $this->item('shirt-blue', 'configurable', 2.0, 0.0, 0.0, 0.0, 0.0, false, productId: 20);
+        $child = $this->item('shirt-blue', 'simple', 2.0, 0.0, 0.0, 0.0, 0.0, false, productId: 21, parent: $parent);
+        $service = $this->service(null, [20 => ['sku' => 'shirt', 'type' => 'configurable'], 21 => ['sku' => 'shirt-blue', 'type' => 'simple']]);
+
+        self::assertSame(-2.0, $service->expectedSum($this->order(Order::STATE_PROCESSING, [$parent, $child]), 'shirt-blue', null, 21));
+    }
+
+    #[Test]
     public function a_grouped_products_child_counts_under_its_own_product(): void
     {
         // Magento saves a grouped product's child line with the type "grouped"
