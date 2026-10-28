@@ -37,6 +37,11 @@
     "conflict": {
         "yireo/magento2-replace-inventory": "*"
     },
+    "extra": {
+        "branch-alias": {
+            "dev-main": "1.0.x-dev"
+        }
+    },
     "autoload": {
         "files": [
             "src/registration.php"
