@@ -13,6 +13,7 @@ use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
 use Magento\Framework\App\ResourceConnection;
 use Magento\InventoryConfigurationApi\Api\GetStockItemConfigurationInterface;
 use Magento\InventoryConfigurationApi\Model\IsSourceItemManagementAllowedForProductTypeInterface;
+use Hyva\InventoryOrderReservation\Model\Obligation;
 use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservation\Model\ResourceModel\WebsiteStock;
 use Magento\InventoryConfigurationApi\Api\Data\StockItemConfigurationInterface;
@@ -127,6 +128,17 @@ class RemainingInconsistencyTest extends TestCase
 
         self::assertSame(-2.0, $service->expectedSum($order, 'OLD', null, 10), 'the row\'s product still owes two');
         self::assertSame(0.0, $service->expectedSum($order, 'OLD'), 'by sku alone the renamed line is not found');
+    }
+
+    #[Test]
+    public function a_row_is_renamed_when_the_catalog_names_its_product_otherwise(): void
+    {
+        $service = $this->service(null, [10 => ['sku' => 'NEW', 'type' => 'simple'], 11 => ['sku' => 'mug', 'type' => 'simple']]);
+
+        self::assertSame('NEW', $service->renamedTo(new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10)));
+        self::assertNull($service->renamedTo(new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 11)), 'same sku');
+        self::assertNull($service->renamedTo(new Obligation(9, 'gone', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 12)), 'product deleted');
+        self::assertNull($service->renamedTo(new Obligation(9, 'old-row', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY)), 'no product id recorded');
     }
 
     #[Test]

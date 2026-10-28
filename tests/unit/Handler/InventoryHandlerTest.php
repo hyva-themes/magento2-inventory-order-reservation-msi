@@ -11,7 +11,6 @@ namespace Hyva\InventoryOrderReservationMsi\Test\Unit\Handler;
 
 use Hyva\InventoryOrderReservation\Model\Handler\RowOutcome;
 use Hyva\InventoryOrderReservation\Model\Obligation;
-use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
 use Hyva\InventoryOrderReservationMsi\Model\Handler\InventoryHandler;
 use Magento\Framework\Serialize\Serializer\Json;
@@ -289,11 +288,12 @@ class InventoryHandlerTest extends TestCase
             static fn (object $order, string $sku, int $recordedStock): array => $remaindersBySku[$sku] ?? [$recordedStock => $remainingBySku[$sku] ?? 0.0]
         );
         $remaining->method('currentStockId')->willReturn($currentStock);
-        $products = $this->createStub(ProductIdentities::class);
-        $products->method('byProductIds')->willReturnCallback(
-            static fn (array $ids): array => array_intersect_key($catalog, array_flip($ids))
+        $remaining->method('renamedTo')->willReturnCallback(
+            static fn (Obligation $row): ?string => $row->productId !== null && isset($catalog[$row->productId]) && $catalog[$row->productId]['sku'] !== $row->sku
+                ? $catalog[$row->productId]['sku']
+                : null
         );
-        return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining, $products);
+        return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining);
     }
 
     /**

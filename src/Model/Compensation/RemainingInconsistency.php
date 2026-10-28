@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Hyva\InventoryOrderReservationMsi\Model\Compensation;
 
+use Hyva\InventoryOrderReservation\Model\Obligation;
 use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservation\Model\ResourceModel\WebsiteStock;
 use Magento\Catalog\Model\Product\Type\AbstractType;
@@ -68,6 +69,23 @@ class RemainingInconsistency
         $expected = $this->expectedSum($order, $sku, $stockId, $productId);
         $actual = $this->actualSum((int) $order->getEntityId(), (string) $order->getIncrementId(), $sku, $stockId);
         return ['expected' => $expected, 'actual' => $actual, 'remaining' => round($expected - $actual, 4)];
+    }
+
+    /**
+     * The sku the catalog gives the row's product now, when it differs from the sku the row was recorded under; null when it does not, or the row names no product the catalog holds.
+     *
+     * A renamed row has two candidate reservation keys: the recorded sku,
+     * which Magento's shipment no longer deducts, and the new one, which the
+     * record does not name. Neither the registration nor a compensation
+     * picks one; the row is closed by hand (inventory:order-reservation:settle).
+     */
+    public function renamedTo(Obligation $row): ?string
+    {
+        if ($row->productId === null) {
+            return null;
+        }
+        $current = $this->products->byProductIds([$row->productId])[$row->productId]['sku'] ?? null;
+        return $current !== null && $current !== $row->sku ? $current : null;
     }
 
     /**

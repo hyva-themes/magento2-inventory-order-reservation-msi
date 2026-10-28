@@ -124,6 +124,25 @@ class CoordinatedCompensationTest extends TestCase
         self::assertSame(Outcome::APPLIED, $outcome->kind, 'applied on stock 2, the row not settled yet');
     }
 
+    public function test_a_renamed_row_takes_no_compensation_whether_refused_before_or_by_the_registration_first(): void
+    {
+        // recorded as mug for product 10, which the catalog calls mug-new now;
+        // by product the order still owes one, so the amount alone would pass
+        $owed = new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10);
+        $refused = new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY, Obligation::STATUS_REFUSED, productId: 10);
+        foreach (['refused before' => [$refused, null, false], 'refused by the registration' => [$owed, $refused, true]] as $case => [$row, $after, $ran]) {
+            $obligations = $this->rows($row, $after);
+            $obligations->expects(self::never())->method('markRowDone');
+            $service = $this->service(registrationRan: $ran, remaining: -1.0, writer: $this->writer(expectRows: 0), obligations: $obligations, renamedTo: 'mug-new');
+
+            $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
+
+            self::assertTrue($outcome->isRefused(), $case);
+            self::assertStringContainsString('renamed to mug-new', $outcome->reason, $case);
+            self::assertStringContainsString('inventory:order-reservation:settle 9', $outcome->reason, $case);
+        }
+    }
+
     public function test_a_refused_row_is_judged_without_registering_the_orders_other_rows(): void
     {
         $registration = $this->createMock(StockRegistration::class);
@@ -291,7 +310,8 @@ class CoordinatedCompensationTest extends TestCase
         ?RemainingInconsistency $remainingService = null,
         ?Obligation $obligation = null,
         ?ObligationResource $obligations = null,
-        ?StockRegistration $registration = null
+        ?StockRegistration $registration = null,
+        ?string $renamedTo = null
     ): CoordinatedCompensation {
         $mutex = $this->createStub(OrderMutexInterface::class);
         $mutex->method('execute')->willReturnCallback(static fn (int $orderId, callable $callable, array $args) => $callable(...$args));
@@ -304,6 +324,7 @@ class CoordinatedCompensationTest extends TestCase
         if ($remainingService === null) {
             $remainingService = $this->createStub(RemainingInconsistency::class);
             $remainingService->method('forOrderSku')->willReturn(['expected' => $remaining, 'actual' => 0.0, 'remaining' => $remaining]);
+            $remainingService->method('renamedTo')->willReturn($renamedTo);
             // after a write of the whole remainder nothing is left on the one stock; a partial write leaves the rest
             $remainingService->method('remaindersForRow')->willReturnCallback(
                 static fn (): array => [2 => $remaining + 1.0 < -Obligation::TOLERANCE ? round($remaining + 1.0, 4) : 0.0]

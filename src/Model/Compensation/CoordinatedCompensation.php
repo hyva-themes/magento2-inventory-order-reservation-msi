@@ -93,6 +93,18 @@ class CoordinatedCompensation
         if ($obligation->mode !== Obligation::MODE_INVENTORY || $obligation->stockId === null) {
             return $this->refuse($sku, $stockId, $requested, $ran, 'the order\'s stock side is the legacy stock item, not a Magento Inventory stock');
         }
+        // a row the registration refuses for a rename is refused here too: a
+        // compensation under the recorded sku would settle it while the
+        // product's stock, kept under the new sku, stays wrong
+        $renamedTo = $this->remaining->renamedTo($obligation);
+        if ($renamedTo !== null) {
+            return $this->refuse($sku, $stockId, $requested, $ran, sprintf(
+                'the product was renamed to %s after the order was recorded; inventory:order-reservation:settle %d closes the row once the stock of %s is corrected by hand',
+                $renamedTo,
+                $orderId,
+                $renamedTo
+            ));
+        }
         // judged on the stock the request names: the order's expectation on
         // the stock the website sells from now, zero elsewhere, less the rows
         // on that stock; a stock the order expects nothing on and holds no
