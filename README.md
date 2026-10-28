@@ -55,7 +55,7 @@ Magento's reservation cleanup deletes balanced rows. We never read those rows to
 
 Every class in this package names the MSI interfaces it needs in its constructor. The module is sequenced on the MSI modules, so it only loads where they exist.
 
-Unit tests run against a Magento vendor directory that has MSI and the core module installed, or the core checked out next to this package:
+Unit tests run against a Magento vendor directory that has MSI installed. The core module comes from that vendor directory, or from a checkout of it next to this package (`../magento2-inventory-order-reservation`):
 
 ```sh
 MAGENTO_VENDOR_PATH=/path/to/magento/vendor/autoload.php php phpunit-10.phar
