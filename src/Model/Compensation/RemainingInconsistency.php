@@ -197,16 +197,17 @@ class RemainingInconsistency
     {
         $connection = $this->resourceConnection->getConnection();
         // the reservation table's only index leads with the stock id, so the
-        // stocks are named: a filter on the sku alone reads the whole table
-        $stockIds = $connection->fetchCol(
-            $connection->select()->from($this->resourceConnection->getTableName('inventory_stock'), ['stock_id'])
-        );
+        // stocks are named: a filter on the sku alone reads the whole table.
+        // They are read off that index (a loose scan, one entry per stock),
+        // not off inventory_stock, so rows on a stock deleted since still count.
+        $table = $this->resourceConnection->getTableName('inventory_reservation');
+        $stockIds = $connection->fetchCol($connection->select()->distinct()->from($table, ['stock_id']));
         if ($stockIds === []) {
             return [];
         }
         $select = $connection->select()
             ->distinct()
-            ->from($this->resourceConnection->getTableName('inventory_reservation'), ['stock_id'])
+            ->from($table, ['stock_id'])
             ->where('stock_id IN (?)', array_map('intval', $stockIds))
             ->where('sku = ?', $sku)
             ->where(
