@@ -24,11 +24,14 @@ use Magento\InventorySalesApi\Api\Data\SalesEventExtensionFactory;
 use Magento\InventorySalesApi\Api\Data\SalesEventExtensionInterface;
 use Magento\InventorySalesApi\Api\Data\SalesEventInterface;
 use Magento\InventorySalesApi\Api\Data\SalesEventInterfaceFactory;
+use Hyva\InventoryOrderReservationMsi\Test\Unit\ReservationStore;
 use Magento\Sales\Model\Order;
 use PHPUnit\Framework\TestCase;
 
 class InventoryHandlerTest extends TestCase
 {
+    use ReservationStore;
+
     /** @var array<int, array{sku: string, qty: float, stock: int, metadata: array}> the rows given to Inventory's writer, in order */
     private array $written = [];
 
@@ -86,19 +89,62 @@ class InventoryHandlerTest extends TestCase
         self::assertSame(-2.0, $outcomes[0]->placed);
     }
 
-    public function test_a_row_whose_product_was_renamed_is_refused_not_balanced(): void
+    public function test_a_renamed_row_is_placed_under_the_new_sku_once_magento_moved_the_orders_reservations(): void
     {
-        // recorded as OLD for product 10, renamed to NEW before the registration ran
-        $handler = $this->handler(['OLD' => 0.0, 'NEW' => 0.0], catalog: [10 => ['sku' => 'NEW', 'type' => 'simple']]);
+        // recorded as OLD for product 10, renamed to NEW before the registration ran; no row of the order is left under OLD
+        $this->reserve(2, 'NEW', -5.0, 7);
+        $remaining = $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']]);
+        $handler = $this->handler([], remaining: $remaining);
 
-        $outcomes = $handler->register($this->order(9, '000000009'), [
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'OLD', 2.0]]), [
+            new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10),
+        ]);
+
+        self::assertSame(['OLD' => 'placed'], $this->kinds($outcomes));
+        self::assertSame([['sku' => 'NEW', 'qty' => -2.0, 'stock' => 2]], $this->placements(), 'placed where the product\'s shipment deducts');
+    }
+
+    public function test_a_renamed_row_whose_placement_magento_moved_is_balanced(): void
+    {
+        $this->reserve(2, 'NEW', -2.0, 9);
+        $handler = $this->handler([], remaining: $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']]));
+
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'OLD', 2.0]]), [
+            new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10),
+        ]);
+
+        self::assertSame(['OLD' => 'balanced'], $this->kinds($outcomes));
+        self::assertSame(0, $this->appends);
+    }
+
+    public function test_a_renamed_row_is_refused_while_a_reservation_of_the_order_remains_under_the_recorded_sku(): void
+    {
+        // Magento's consumer has not moved the order's rows yet: one of them is still under OLD
+        $this->reserve(2, 'OLD', -1.0, 9);
+        $handler = $this->handler([], remaining: $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']]));
+
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'OLD', 2.0]]), [
             new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10),
         ]);
 
         self::assertSame(['OLD' => 'refused'], $this->kinds($outcomes));
-        self::assertStringContainsString('Sku OLD is NEW in the catalog now', $outcomes[0]->reason);
-        self::assertStringContainsString('inventory:order-reservation:settle 9', $outcomes[0]->reason);
+        self::assertStringContainsString('Sku OLD is NEW in the catalog now, and the order\'s reservations are still under OLD', $outcomes[0]->reason);
+        self::assertStringContainsString('queue:consumers:start inventory.reservations.update, then inventory:order-reservation:run 9', $outcomes[0]->reason);
         self::assertSame(0, $this->appends, 'nothing written under either sku');
+    }
+
+    public function test_a_renamed_row_is_refused_with_synchronize_with_catalog_off(): void
+    {
+        $handler = $this->handler([], remaining: $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']], synchronized: false));
+
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'OLD', 2.0]]), [
+            new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10),
+        ]);
+
+        self::assertSame(['OLD' => 'refused'], $this->kinds($outcomes));
+        self::assertStringContainsString('with Synchronize with Catalog off', $outcomes[0]->reason);
+        self::assertStringContainsString('then inventory:order-reservation:run 9 places the row under NEW', $outcomes[0]->reason);
+        self::assertSame(0, $this->appends);
     }
 
     public function test_a_row_with_a_reservation_of_an_ambiguous_order_number_is_refused_not_placed_again(): void
@@ -120,9 +166,9 @@ class InventoryHandlerTest extends TestCase
 
     public function test_a_row_whose_product_keeps_its_sku_is_placed(): void
     {
-        $handler = $this->handler(['mug' => -2.0], catalog: [10 => ['sku' => 'mug', 'type' => 'simple']]);
+        $handler = $this->handler([], remaining: $this->remainingOver([10 => ['sku' => 'mug', 'type' => 'simple']]));
 
-        $outcomes = $handler->register($this->order(9, '000000009'), [
+        $outcomes = $handler->register($this->openOrder(9, '000000009', [[10, 'mug', 2.0]]), [
             new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10),
         ]);
 
@@ -231,9 +277,17 @@ class InventoryHandlerTest extends TestCase
      * @param callable(string): bool|null $managed whether a type allows source-item management
      * @param array<string, array<int, float>> $remaindersBySku the remainders per stock for a sku, when more than one stock matters
      * @param int $currentStock the stock the website sells from now
+     * @param RemainingInconsistency|null $remaining a real service (ReservationStore) in place of the given remainders
      */
-    private function handler(array $remainingBySku, array $types = [], ?callable $managed = null, array $remaindersBySku = [], int $currentStock = 2, array $catalog = [], array $ambiguousSkus = []): InventoryHandler
-    {
+    private function handler(
+        array $remainingBySku,
+        array $types = [],
+        ?callable $managed = null,
+        array $remaindersBySku = [],
+        int $currentStock = 2,
+        array $ambiguousSkus = [],
+        ?RemainingInconsistency $remaining = null
+    ): InventoryHandler {
         $builder = $this->createStub(ReservationBuilderInterface::class);
         $row = [];
         $builder->method('setSku')->willReturnCallback(function (string $sku) use (&$row, $builder): ReservationBuilderInterface {
@@ -300,6 +354,9 @@ class InventoryHandlerTest extends TestCase
         }
         $allowed = $this->createStub(IsSourceItemManagementAllowedForProductTypeInterface::class);
         $allowed->method('execute')->willReturnCallback(static fn (string $type): bool => $managed === null || $managed($type));
+        if ($remaining !== null) {
+            return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining);
+        }
         $remaining = $this->createStub(RemainingInconsistency::class);
         $remaining->method('remaindersForRow')->willReturnCallback(
             static fn (object $order, string $sku, int $recordedStock): array => $remaindersBySku[$sku] ?? [$recordedStock => $remainingBySku[$sku] ?? 0.0]
@@ -308,12 +365,15 @@ class InventoryHandlerTest extends TestCase
         $remaining->method('hasAmbiguousRows')->willReturnCallback(
             static fn (object $order, string $sku): bool => in_array($sku, $ambiguousSkus, true)
         );
-        $remaining->method('renamedTo')->willReturnCallback(
-            static fn (Obligation $row): ?string => $row->productId !== null && isset($catalog[$row->productId]) && $catalog[$row->productId]['sku'] !== $row->sku
-                ? $catalog[$row->productId]['sku']
-                : null
-        );
         return new InventoryHandler($builder, $writer, $events, $extensions, $converter, new Json(), $productTypes, $allowed, $remaining);
+    }
+
+    /**
+     * @return array<int, array{sku: string, qty: float, stock: int}> the rows written, without their metadata
+     */
+    private function placements(): array
+    {
+        return array_map(static fn (array $row): array => ['sku' => $row['sku'], 'qty' => $row['qty'], 'stock' => $row['stock']], $this->written);
     }
 
     /**

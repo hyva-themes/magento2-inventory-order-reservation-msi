@@ -30,7 +30,9 @@ use Magento\Sales\Model\OrderMutexInterface;
  * The request is held against the order's persisted obligation before
  * anything is calculated: a sku the order owes nothing on, an obligation
  * or settled on the legacy stock item (no stock to compensate), is
- * refused outright.
+ * refused outright. A row whose product the catalog renamed is found
+ * under its new sku and judged there once Magento Inventory moved the
+ * order's reservations to it, and refused until then (Rename).
  * Then, on the stock the request names: already balanced, nothing is
  * written; the right amount, or part of it toward balance, is written
  * with the remainder reported; the wrong direction or more than remains
@@ -93,24 +95,23 @@ class CoordinatedCompensation
         if ($obligation->mode !== Obligation::MODE_INVENTORY || $obligation->stockId === null) {
             return $this->refuse($sku, $stockId, $requested, $ran, 'the order\'s stock side is the legacy stock item, not a Magento Inventory stock');
         }
-        // a row the registration refuses for a rename is refused here too: a
-        // compensation under the recorded sku would settle it while the
-        // product's stock, kept under the new sku, stays wrong
-        $renamedTo = $this->remaining->renamedTo($obligation);
-        if ($renamedTo !== null) {
-            return $this->refuse($sku, $stockId, $requested, $ran, sprintf(
-                'the product was renamed to %s after the order was recorded; inventory:order-reservation:settle %d closes the row once the stock of %s is corrected by hand',
-                $renamedTo,
-                $orderId,
-                $renamedTo
-            ));
-        }
-        // judged on the stock the request names: the order's expectation on
-        // the stock the website sells from now, zero elsewhere, less the rows
-        // on that stock; a stock the order expects nothing on and holds no
-        // row on is balanced, which keeps a compensation off a stock the
-        // order has nothing to do with
         $order = $this->orderRepository->get($orderId);
+        // a renamed row is judged under the catalog's sku once Magento
+        // Inventory moved the order's reservations there, and refused while
+        // they are split or kept under the recorded sku, as the registration
+        // refuses it
+        $rename = $this->remaining->rename($order, $obligation);
+        if ($rename !== null) {
+            if (!$rename->isFollowed()) {
+                return $this->refuse($sku, $stockId, $requested, $ran, $this->renameRefusal($rename, $orderId));
+            }
+            if ($sku !== $rename->currentSku) {
+                return $this->refuse($sku, $stockId, $requested, $ran, sprintf(
+                    'the product is %1$s in the catalog now and Magento Inventory moved the order\'s reservations to %1$s; a compensation under %1$s repairs the row',
+                    $rename->currentSku
+                ));
+            }
+        }
         if ($this->remaining->hasAmbiguousRows($order, $sku)) {
             // refused by the registration for the same reason: a row that may
             // be this order's is counted for none, so the numbers below are not
@@ -121,6 +122,11 @@ class CoordinatedCompensation
                 $orderId
             ));
         }
+        // judged on the stock the request names: the order's expectation on
+        // the stock the website sells from now, zero elsewhere, less the rows
+        // on that stock; a stock the order expects nothing on and holds no
+        // row on is balanced, which keeps a compensation off a stock the
+        // order has nothing to do with
         $remaining = $this->remaining->forOrderSku($order, $sku, $stockId, $obligation->productId)['remaining'];
         if (abs($remaining) < Obligation::TOLERANCE) {
             return new Outcome(Outcome::ALREADY_BALANCED, $sku, $stockId, $requested, 0.0, 0.0, $ran);
@@ -150,7 +156,7 @@ class CoordinatedCompensation
             // it, nothing remaining on any stock that matters to it. The
             // order's other skus keep their own state until each is balanced,
             // so one repair never hides another discrepancy.
-            $this->obligations->markRowDone($orderId, $sku, Obligation::SETTLED_BY_COMPENSATION);
+            $this->obligations->markRowDone($orderId, $obligation->sku, Obligation::SETTLED_BY_COMPENSATION);
         }
         return new Outcome(
             abs($after) < Obligation::TOLERANCE ? Outcome::APPLIED : Outcome::PARTIAL,
@@ -185,12 +191,44 @@ class CoordinatedCompensation
     }
 
     /**
-     * The order's persisted obligation for the sku, the row the request is held against.
+     * Why a compensation for a renamed row is refused, and the step that moves it on.
+     */
+    private function renameRefusal(Rename $rename, int $orderId): string
+    {
+        if ($rename->state === Rename::PENDING) {
+            return sprintf(
+                'the product is %2$s in the catalog now and the order\'s reservations are still under %1$s; Magento Inventory moves them to %2$s '
+                . 'through its inventory.reservations.update consumer: run bin/magento queue:consumers:start inventory.reservations.update, '
+                . 'then repeat the compensation under %2$s. Should they stay under %1$s after that, the product was renamed while Synchronize with Catalog was off, '
+                . 'and inventory:order-reservation:settle %3$d closes the row',
+                $rename->recordedSku,
+                $rename->currentSku,
+                $orderId
+            );
+        }
+        return sprintf(
+            'the product is %2$s in the catalog now, and with Synchronize with Catalog off Magento Inventory does not move reservations to a renamed sku; '
+            . 'turn it on (Stores > Configuration > Catalog > Inventory > Stock Options), then a compensation under %2$s is judged there '
+            . 'when no reservation of the order is left under %1$s; inventory:order-reservation:settle %3$d closes the row otherwise',
+            $rename->recordedSku,
+            $rename->currentSku,
+            $orderId
+        );
+    }
+
+    /**
+     * The order's persisted obligation for the sku, the row the request is held against: the row recorded under the sku, else a row whose product the catalog renamed to it since.
      */
     private function obligationFor(int $orderId, string $sku): ?Obligation
     {
-        foreach ($this->obligations->forOrder($orderId) as $obligation) {
+        $rows = $this->obligations->forOrder($orderId);
+        foreach ($rows as $obligation) {
             if ($obligation->sku === $sku) {
+                return $obligation;
+            }
+        }
+        foreach ($rows as $obligation) {
+            if ($this->remaining->renamedTo($obligation) === $sku) {
                 return $obligation;
             }
         }

@@ -13,6 +13,7 @@ use Hyva\InventoryOrderReservation\Model\Obligation;
 use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservation\Model\ResourceModel\WebsiteStock;
 use Magento\Catalog\Model\Product\Type\AbstractType;
+use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\App\ResourceConnection;
 use Magento\InventoryConfigurationApi\Api\GetStockItemConfigurationInterface;
 use Magento\InventoryConfigurationApi\Model\IsSourceItemManagementAllowedForProductTypeInterface;
@@ -51,6 +52,8 @@ use Magento\Store\Api\WebsiteRepositoryInterface;
 class RemainingInconsistency
 {
     private const GROUPED = 'grouped';
+    /** The setting under which Magento Inventory moves reservations to a renamed sku (UpdateReservationsPlugin). */
+    private const XML_PATH_SYNCHRONIZE_WITH_CATALOG = 'cataloginventory/options/synchronize_with_catalog';
 
     public function __construct(
         private readonly ResourceConnection $resourceConnection,
@@ -58,7 +61,8 @@ class RemainingInconsistency
         private readonly GetStockItemConfigurationInterface $stockItemConfiguration,
         private readonly WebsiteStock $websiteStock,
         private readonly WebsiteRepositoryInterface $websiteRepository,
-        private readonly ProductIdentities $products
+        private readonly ProductIdentities $products,
+        private readonly ScopeConfigInterface $scopeConfig
     ) {
     }
 
@@ -73,11 +77,6 @@ class RemainingInconsistency
 
     /**
      * The sku the catalog gives the row's product now, when it differs from the sku the row was recorded under; null when it does not, or the row names no product the catalog holds.
-     *
-     * A renamed row has two candidate reservation keys: the recorded sku,
-     * which Magento's shipment no longer deducts, and the new one, which the
-     * record does not name. Neither the registration nor a compensation
-     * picks one; the row is closed by hand (inventory:order-reservation:settle).
      */
     public function renamedTo(Obligation $row): ?string
     {
@@ -86,6 +85,29 @@ class RemainingInconsistency
         }
         $current = $this->products->byProductIds([$row->productId])[$row->productId]['sku'] ?? null;
         return $current !== null && $current !== $row->sku ? $current : null;
+    }
+
+    /**
+     * Where the order's reservations for a renamed row are now (Rename); null when the row was not renamed.
+     *
+     * Magento Inventory moves the reservations of a renamed sku itself, all
+     * of them, through a queue consumer, and only with Synchronize with
+     * Catalog on (a default-scope setting, read as its plugin reads it). So
+     * the setting on and no row of the order left under the recorded sku
+     * means the consumer ran and the row is the catalog's sku's now.
+     */
+    public function rename(OrderInterface $order, Obligation $row): ?Rename
+    {
+        $current = $this->renamedTo($row);
+        if ($current === null) {
+            return null;
+        }
+        if (!$this->scopeConfig->isSetFlag(self::XML_PATH_SYNCHRONIZE_WITH_CATALOG)) {
+            return new Rename($row->sku, $current, Rename::NOT_SYNCHRONIZED);
+        }
+        $rowsRemain = $this->stocksWithRows((int) $order->getEntityId(), (string) $order->getIncrementId(), $row->sku) !== []
+            || $this->hasAmbiguousRows($order, $row->sku);
+        return new Rename($row->sku, $current, $rowsRemain ? Rename::PENDING : Rename::FOLLOWED);
     }
 
     /**

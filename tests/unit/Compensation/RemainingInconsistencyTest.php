@@ -10,6 +10,9 @@ declare(strict_types=1);
 namespace Hyva\InventoryOrderReservationMsi\Test\Unit\Compensation;
 
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
+use Hyva\InventoryOrderReservationMsi\Model\Compensation\Rename;
+use Hyva\InventoryOrderReservationMsi\Test\Unit\ReservationStore;
+use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\App\ResourceConnection;
 use Magento\InventoryConfigurationApi\Api\GetStockItemConfigurationInterface;
 use Magento\InventoryConfigurationApi\Model\IsSourceItemManagementAllowedForProductTypeInterface;
@@ -27,6 +30,8 @@ use PHPUnit\Framework\TestCase;
 
 class RemainingInconsistencyTest extends TestCase
 {
+    use ReservationStore;
+
     public function test_a_final_order_expects_zero(): void
     {
         $order = $this->order(Order::STATE_COMPLETE, [$this->item('mug', 'simple', 3, 0, 0, 3, 3, false)]);
@@ -142,6 +147,60 @@ class RemainingInconsistencyTest extends TestCase
     }
 
     #[Test]
+    public function a_renamed_row_follows_its_reservations_to_the_new_sku_once_magento_moved_them(): void
+    {
+        // the consumer moved the order's placement from OLD to NEW
+        $this->reserve(2, 'NEW', -2.0, 9);
+        $row = new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10);
+
+        $rename = $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']])->rename($this->openOrder(9, '000000009', []), $row);
+
+        self::assertSame(['OLD', 'NEW', Rename::FOLLOWED], [$rename->recordedSku, $rename->currentSku, $rename->state]);
+    }
+
+    #[Test]
+    public function a_renamed_row_is_pending_while_a_reservation_of_the_order_remains_under_the_recorded_sku(): void
+    {
+        $catalog = [10 => ['sku' => 'NEW', 'type' => 'simple']];
+        $row = new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10);
+        $this->reserve(2, 'OLD', -2.0, 9);
+        $this->reserve(2, 'NEW', -1.0, 7);
+
+        self::assertSame(Rename::PENDING, $this->remainingOver($catalog)->rename($this->openOrder(9, '000000009', []), $row)->state, 'the order\'s own row');
+
+        $this->reservations = [];
+        $this->reserve(2, 'OLD', -2.0, null, '000000009');
+        self::assertSame(
+            Rename::PENDING,
+            $this->remainingOver($catalog, ordersByIncrementId: ['000000009' => 2])->rename($this->openOrder(9, '000000009', []), $row)->state,
+            'a row naming only the order number, which another order carries too'
+        );
+
+        $this->reservations = [];
+        $this->reserve(2, 'OLD', -2.0, 8);
+        self::assertSame(Rename::FOLLOWED, $this->remainingOver($catalog)->rename($this->openOrder(9, '000000009', []), $row)->state, 'another order\'s row');
+    }
+
+    #[Test]
+    public function a_renamed_row_is_not_followed_with_synchronize_with_catalog_off(): void
+    {
+        $row = new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10);
+
+        $rename = $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']], synchronized: false)
+            ->rename($this->openOrder(9, '000000009', []), $row);
+
+        self::assertSame(Rename::NOT_SYNCHRONIZED, $rename->state);
+    }
+
+    #[Test]
+    public function a_row_the_catalog_did_not_rename_has_no_rename(): void
+    {
+        $row = new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10);
+
+        self::assertNull($this->remainingOver([10 => ['sku' => 'mug', 'type' => 'simple']])->rename($this->openOrder(9, '000000009', []), $row));
+    }
+
+    #[Test]
     public function a_row_with_a_product_id_ignores_a_composite_parent_line(): void
     {
         $parent = $this->item('shirt-blue', 'configurable', 2.0, 0.0, 0.0, 0.0, 0.0, false, productId: 20);
@@ -220,7 +279,15 @@ class RemainingInconsistencyTest extends TestCase
         $products->method('byProductIds')->willReturnCallback(
             static fn (array $ids): array => array_intersect_key($catalog, array_flip($ids))
         );
-        return new RemainingInconsistency($this->createStub(ResourceConnection::class), $allowed, $configuration, $websiteStock, $websites, $products);
+        return new RemainingInconsistency(
+            $this->createStub(ResourceConnection::class),
+            $allowed,
+            $configuration,
+            $websiteStock,
+            $websites,
+            $products,
+            $this->createStub(ScopeConfigInterface::class)
+        );
     }
 
     private function item(

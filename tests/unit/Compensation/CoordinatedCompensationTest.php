@@ -15,6 +15,7 @@ use Hyva\InventoryOrderReservation\Model\StockRegistration;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\CoordinatedCompensation;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\Outcome;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
+use Hyva\InventoryOrderReservationMsi\Test\Unit\ReservationStore;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\InventoryReservationsApi\Model\AppendReservationsInterface;
 use Magento\InventoryReservationsApi\Model\ReservationInterface;
@@ -25,6 +26,8 @@ use PHPUnit\Framework\TestCase;
 
 class CoordinatedCompensationTest extends TestCase
 {
+    use ReservationStore;
+
     /** @var array<int, array{0: object, 1: int}> */
     private array $writers = [];
 
@@ -124,23 +127,99 @@ class CoordinatedCompensationTest extends TestCase
         self::assertSame(Outcome::APPLIED, $outcome->kind, 'applied on stock 2, the row not settled yet');
     }
 
-    public function test_a_renamed_row_takes_no_compensation_whether_refused_before_or_by_the_registration_first(): void
+    public function test_a_renamed_row_is_compensated_under_the_new_sku_once_magento_moved_the_orders_reservations(): void
     {
-        // recorded as mug for product 10, which the catalog calls mug-new now;
-        // by product the order still owes one, so the amount alone would pass
-        $owed = new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY, productId: 10);
-        $refused = new Obligation(9, 'mug', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY, Obligation::STATUS_REFUSED, productId: 10);
-        foreach (['refused before' => [$refused, null, false], 'refused by the registration' => [$owed, $refused, true]] as $case => [$row, $after, $ran]) {
+        // recorded as OLD for product 10, now NEW; the registration refused the row and nothing of the order is left under OLD
+        $obligations = $this->rows($this->renamedRow(Obligation::STATUS_REFUSED), null);
+        $obligations->expects(self::once())->method('markRowDone')->with(9, 'OLD', Obligation::SETTLED_BY_COMPENSATION);
+        $writer = $this->writer(expectRows: 1, onWrite: fn (ReservationInterface $row) => $this->reserve(
+            (int) $row->getStockId(),
+            (string) $row->getSku(),
+            (float) $row->getQuantity(),
+            9
+        ));
+        $service = $this->service(
+            registrationRan: false,
+            remaining: 0.0,
+            writer: $writer,
+            remainingService: $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']]),
+            obligations: $obligations,
+            order: $this->openOrder(9, '000000009', [[10, 'OLD', 2.0]])
+        );
+
+        $outcome = $service->apply(9, $this->reservation('NEW', 2, -2.0));
+
+        self::assertSame(Outcome::APPLIED, $outcome->kind);
+        self::assertSame('NEW', $outcome->sku);
+    }
+
+    public function test_a_compensation_under_the_recorded_sku_of_a_followed_rename_names_the_new_sku(): void
+    {
+        $obligations = $this->rows($this->renamedRow(Obligation::STATUS_REFUSED), null);
+        $obligations->expects(self::never())->method('markRowDone');
+        $service = $this->service(
+            registrationRan: false,
+            remaining: 0.0,
+            writer: $this->writer(expectRows: 0),
+            remainingService: $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']]),
+            obligations: $obligations,
+            order: $this->openOrder(9, '000000009', [[10, 'OLD', 2.0]])
+        );
+
+        $outcome = $service->apply(9, $this->reservation('OLD', 2, -2.0));
+
+        self::assertTrue($outcome->isRefused());
+        self::assertStringContainsString('a compensation under NEW repairs the row', $outcome->reason);
+    }
+
+    public function test_a_renamed_row_takes_no_compensation_while_a_reservation_of_the_order_remains_under_the_recorded_sku(): void
+    {
+        // refused before, or refused by the registration the compensation runs first; asked under either sku
+        $this->reserve(2, 'OLD', -1.0, 9);
+        $cases = [
+            'refused before, asked under the new sku' => [$this->renamedRow(Obligation::STATUS_REFUSED), null, false, 'NEW'],
+            'refused before, asked under the recorded sku' => [$this->renamedRow(Obligation::STATUS_REFUSED), null, false, 'OLD'],
+            'refused by the registration' => [$this->renamedRow(Obligation::STATUS_OWED), $this->renamedRow(Obligation::STATUS_REFUSED), true, 'NEW'],
+        ];
+        foreach ($cases as $case => [$row, $after, $ran, $sku]) {
             $obligations = $this->rows($row, $after);
             $obligations->expects(self::never())->method('markRowDone');
-            $service = $this->service(registrationRan: $ran, remaining: -1.0, writer: $this->writer(expectRows: 0), obligations: $obligations, renamedTo: 'mug-new');
+            $service = $this->service(
+                registrationRan: $ran,
+                remaining: 0.0,
+                writer: $this->writer(expectRows: 0),
+                remainingService: $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']]),
+                obligations: $obligations,
+                order: $this->openOrder(9, '000000009', [[10, 'OLD', 2.0]])
+            );
 
-            $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
+            $outcome = $service->apply(9, $this->reservation($sku, 2, -1.0));
 
             self::assertTrue($outcome->isRefused(), $case);
-            self::assertStringContainsString('renamed to mug-new', $outcome->reason, $case);
-            self::assertStringContainsString('inventory:order-reservation:settle 9', $outcome->reason, $case);
+            self::assertSame($ran, $outcome->registrationRan, $case);
+            self::assertStringContainsString('the order\'s reservations are still under OLD', $outcome->reason, $case);
+            self::assertStringContainsString('queue:consumers:start inventory.reservations.update, then repeat the compensation under NEW', $outcome->reason, $case);
         }
+    }
+
+    public function test_a_renamed_row_takes_no_compensation_with_synchronize_with_catalog_off(): void
+    {
+        $obligations = $this->rows($this->renamedRow(Obligation::STATUS_REFUSED), null);
+        $obligations->expects(self::never())->method('markRowDone');
+        $service = $this->service(
+            registrationRan: false,
+            remaining: 0.0,
+            writer: $this->writer(expectRows: 0),
+            remainingService: $this->remainingOver([10 => ['sku' => 'NEW', 'type' => 'simple']], synchronized: false),
+            obligations: $obligations,
+            order: $this->openOrder(9, '000000009', [[10, 'OLD', 2.0]])
+        );
+
+        $outcome = $service->apply(9, $this->reservation('NEW', 2, -2.0));
+
+        self::assertTrue($outcome->isRefused());
+        self::assertStringContainsString('with Synchronize with Catalog off', $outcome->reason);
+        self::assertStringContainsString('then a compensation under NEW is judged there', $outcome->reason);
     }
 
     public function test_a_compensation_is_refused_while_a_reservation_of_an_ambiguous_order_number_exists(): void
@@ -289,6 +368,11 @@ class CoordinatedCompensationTest extends TestCase
         return $obligations;
     }
 
+    private function renamedRow(string $status): Obligation
+    {
+        return new Obligation(9, 'OLD', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY, $status, productId: 10);
+    }
+
     private function done(Obligation $row): Obligation
     {
         return new Obligation(
@@ -323,8 +407,8 @@ class CoordinatedCompensationTest extends TestCase
         ?Obligation $obligation = null,
         ?ObligationResource $obligations = null,
         ?StockRegistration $registration = null,
-        ?string $renamedTo = null,
-        bool $ambiguous = false
+        bool $ambiguous = false,
+        ?OrderInterface $order = null
     ): CoordinatedCompensation {
         $mutex = $this->createStub(OrderMutexInterface::class);
         $mutex->method('execute')->willReturnCallback(static fn (int $orderId, callable $callable, array $args) => $callable(...$args));
@@ -333,11 +417,10 @@ class CoordinatedCompensationTest extends TestCase
             $registration->method('registerLocked')->willReturn($registrationRan);
         }
         $orders = $this->createStub(OrderRepositoryInterface::class);
-        $orders->method('get')->willReturn($this->createStub(OrderInterface::class));
+        $orders->method('get')->willReturn($order ?? $this->createStub(OrderInterface::class));
         if ($remainingService === null) {
             $remainingService = $this->createStub(RemainingInconsistency::class);
             $remainingService->method('forOrderSku')->willReturn(['expected' => $remaining, 'actual' => 0.0, 'remaining' => $remaining]);
-            $remainingService->method('renamedTo')->willReturn($renamedTo);
             $remainingService->method('hasAmbiguousRows')->willReturn($ambiguous);
             // after a write of the whole remainder nothing is left on the one stock; a partial write leaves the rest
             $remainingService->method('remaindersForRow')->willReturnCallback(
@@ -362,13 +445,26 @@ class CoordinatedCompensationTest extends TestCase
         return new CoordinatedCompensation($mutex, $registration, $orders, $remainingService, $writer, $obligations);
     }
 
-    private function writer(int $expectRows): AppendReservationsInterface
+    /**
+     * @param \Closure(ReservationInterface): void|null $onWrite what a written row does to the store
+     */
+    private function writer(int $expectRows, ?\Closure $onWrite = null): AppendReservationsInterface
     {
-        $writer = new class implements AppendReservationsInterface {
+        $writer = new class($onWrite) implements AppendReservationsInterface {
             public int $calls = 0;
+
+            public function __construct(private readonly ?\Closure $onWrite)
+            {
+            }
+
             public function execute(array $reservations): void
             {
                 $this->calls += count($reservations);
+                foreach ($reservations as $reservation) {
+                    if ($this->onWrite !== null) {
+                        ($this->onWrite)($reservation);
+                    }
+                }
             }
         };
         $this->writers[] = [$writer, $expectRows];
