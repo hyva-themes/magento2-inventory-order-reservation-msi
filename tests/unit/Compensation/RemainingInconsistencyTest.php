@@ -78,10 +78,7 @@ class RemainingInconsistencyTest extends TestCase
     {
         // two ordered, one shipped through the parent: the child's own qty_shipped stays 0 in Magento
         $parent = $this->item('shirt-blue', 'configurable', 2.0, 0.0, 0.0, 1.0, 2.0, false);
-        $child = $this->item('shirt-blue', 'simple', 2.0, 0.0, 0.0, 0.0, 0.0, false);
-        $parent->setItemId(100);
-        $child->setParentItemId(100);
-        $child->setParentItem($parent);
+        $child = $this->item('shirt-blue', 'simple', 2.0, 0.0, 0.0, 0.0, 0.0, false, parent: $parent);
         $service = $this->service($this->managing(['simple']));
 
         self::assertSame(-1.0, $service->expectedSum($this->order(Order::STATE_PROCESSING, [$parent, $child]), 'shirt-blue'));
@@ -90,12 +87,10 @@ class RemainingInconsistencyTest extends TestCase
     #[Test]
     public function a_child_of_a_bundle_that_ships_separately_keeps_its_own_progress(): void
     {
-        $parent = $this->item('bundle', 'bundle', 1.0, 0.0, 0.0, 1.0, 1.0, false);
-        $parent->setItemId(200);
-        $parent->setProductOptions(['shipment_type' => \Magento\Catalog\Model\Product\Type\AbstractType::SHIPMENT_SEPARATELY]);
-        $child = $this->item('bundle-part', 'simple', 3.0, 0.0, 0.0, 1.0, 3.0, false);
-        $child->setParentItemId(200);
-        $child->setParentItem($parent);
+        $parent = $this->item('bundle', 'bundle', 1.0, 0.0, 0.0, 1.0, 1.0, false, options: [
+            'shipment_type' => \Magento\Catalog\Model\Product\Type\AbstractType::SHIPMENT_SEPARATELY,
+        ]);
+        $child = $this->item('bundle-part', 'simple', 3.0, 0.0, 0.0, 1.0, 3.0, false, parent: $parent);
         $service = $this->service($this->managing(['simple']));
 
         self::assertSame(-2.0, $service->expectedSum($this->order(Order::STATE_PROCESSING, [$parent, $child]), 'bundle-part'));
@@ -105,10 +100,7 @@ class RemainingInconsistencyTest extends TestCase
     public function a_canceled_and_refunded_parent_projects_both_onto_its_child(): void
     {
         $parent = $this->item('shirt-red', 'configurable', 4.0, 1.0, 1.0, 2.0, 3.0, false);
-        $parent->setItemId(300);
-        $child = $this->item('shirt-red', 'simple', 4.0, 0.0, 0.0, 0.0, 0.0, false);
-        $child->setParentItemId(300);
-        $child->setParentItem($parent);
+        $child = $this->item('shirt-red', 'simple', 4.0, 0.0, 0.0, 0.0, 0.0, false, parent: $parent);
         $service = $this->service($this->managing(['simple']));
 
         // 4 ordered, 1 canceled, 1 refunded, 2 shipped on the parent: nothing is left to reserve
@@ -177,17 +169,17 @@ class RemainingInconsistencyTest extends TestCase
      */
     private function service(?object $managed = null, array $catalog = []): RemainingInconsistency
     {
-        $allowed = $this->createMock(IsSourceItemManagementAllowedForProductTypeInterface::class);
+        $allowed = $this->createStub(IsSourceItemManagementAllowedForProductTypeInterface::class);
         $allowed->method('execute')->willReturnCallback(
             static fn (string $type): bool => $managed === null || $managed->execute($type)
         );
-        $managedItem = $this->createMock(StockItemConfigurationInterface::class);
+        $managedItem = $this->createStub(StockItemConfigurationInterface::class);
         $managedItem->method('isManageStock')->willReturn(true);
-        $configuration = $this->createMock(GetStockItemConfigurationInterface::class);
+        $configuration = $this->createStub(GetStockItemConfigurationInterface::class);
         $configuration->method('execute')->willReturn($managedItem);
         $websiteStock = $this->createMock(WebsiteStock::class);
         $websiteStock->method('idForWebsiteCode')->with('base')->willReturn(2);
-        $website = $this->createMock(WebsiteInterface::class);
+        $website = $this->createStub(WebsiteInterface::class);
         $website->method('getCode')->willReturn('base');
         $websites = $this->createMock(WebsiteRepositoryInterface::class);
         $websites->method('getById')->with(1)->willReturn($website);
@@ -198,11 +190,22 @@ class RemainingInconsistencyTest extends TestCase
         return new RemainingInconsistency($this->createStub(ResourceConnection::class), $allowed, $configuration, $websiteStock, $websites, $products);
     }
 
-    private function item(string $sku, string $type, float $ordered, float $canceled, float $refunded, float $shipped, float $invoiced, bool $virtual, ?int $productId = null): Item
-    {
-        $item = $this->getMockBuilder(Item::class)->disableOriginalConstructor()
-            ->onlyMethods(['getSku', 'getProductType', 'getProductId', 'getQtyOrdered', 'getQtyCanceled', 'getQtyRefunded', 'getQtyShipped', 'getQtyInvoiced', 'getIsVirtual'])
-            ->getMock();
+    private function item(
+        string $sku,
+        string $type,
+        float $ordered,
+        float $canceled,
+        float $refunded,
+        float $shipped,
+        float $invoiced,
+        bool $virtual,
+        ?int $productId = null,
+        ?Item $parent = null,
+        array $options = []
+    ): Item {
+        $item = $this->createStub(Item::class);
+        $item->method('getParentItem')->willReturn($parent);
+        $item->method('getProductOptions')->willReturn($options);
         $item->method('getSku')->willReturn($sku);
         $item->method('getProductId')->willReturn($productId);
         $item->method('getProductType')->willReturn($type);
@@ -218,9 +221,9 @@ class RemainingInconsistencyTest extends TestCase
     /** @param Item[] $items */
     private function order(string $state, array $items): Order
     {
-        $store = $this->createMock(StoreInterface::class);
+        $store = $this->createStub(StoreInterface::class);
         $store->method('getWebsiteId')->willReturn(1);
-        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()->onlyMethods(['getState', 'getItems', 'getStore'])->getMock();
+        $order = $this->createStub(Order::class);
         $order->method('getState')->willReturn($state);
         $order->method('getItems')->willReturn($items);
         $order->method('getStore')->willReturn($store);

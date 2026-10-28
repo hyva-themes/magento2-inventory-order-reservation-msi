@@ -32,7 +32,7 @@ class ReportCompensationsPluginTest extends TestCase
             return 1;
         };
 
-        $result = $plugin->aroundExecute($this->command(), $proceed, $this->createMock(InputInterface::class), new BufferedOutput());
+        $result = $plugin->aroundExecute($this->command(), $proceed, $this->createStub(InputInterface::class), new BufferedOutput());
 
         self::assertTrue($openDuring, 'open while Magento runs');
         self::assertFalse($notes->isOpen(), 'closed afterwards');
@@ -48,7 +48,7 @@ class ReportCompensationsPluginTest extends TestCase
         };
 
         try {
-            $plugin->aroundExecute($this->command(), $proceed, $this->createMock(InputInterface::class), new BufferedOutput());
+            $plugin->aroundExecute($this->command(), $proceed, $this->createStub(InputInterface::class), new BufferedOutput());
             self::fail('the exception must reach the caller');
         } catch (\RuntimeException $e) {
             self::assertSame('the loop died', $e->getMessage());
@@ -68,7 +68,7 @@ class ReportCompensationsPluginTest extends TestCase
         };
         $output = new BufferedOutput();
 
-        $plugin->aroundExecute($this->command(), $proceed, $this->createMock(InputInterface::class), $output);
+        $plugin->aroundExecute($this->command(), $proceed, $this->createStub(InputInterface::class), $output);
 
         self::assertSame(
             [
@@ -90,7 +90,7 @@ class ReportCompensationsPluginTest extends TestCase
         };
         $output = new BufferedOutput();
 
-        $plugin->aroundExecute($this->command(), $proceed, $this->createMock(InputInterface::class), $output);
+        $plugin->aroundExecute($this->command(), $proceed, $this->createStub(InputInterface::class), $output);
 
         self::assertSame(
             [
@@ -111,21 +111,21 @@ class ReportCompensationsPluginTest extends TestCase
             $notes->noteOutcome(9, new Outcome(Outcome::PARTIAL, 'mug', 2, -1.0, -3.0, -2.0, false));
             return 0;
         };
-        $output = $this->createMock(OutputInterface::class);
+        $output = $this->createStub(OutputInterface::class);
         $output->method('writeln')->willThrowException(new \RuntimeException('closed pipe'));
 
-        self::assertSame(0, $plugin->aroundExecute($this->command(), $proceed, $this->createMock(InputInterface::class), $output));
+        self::assertSame(0, $plugin->aroundExecute($this->command(), $proceed, $this->createStub(InputInterface::class), $output));
     }
 
     private function plugin(CompensationRunNotes $notes, ?LoggerInterface $logger = null, bool $canSubtract = true): ReportCompensationsPlugin
     {
-        $configuration = $this->createMock(StockConfigurationInterface::class);
+        $configuration = $this->createStub(StockConfigurationInterface::class);
         $configuration->method('canSubtractQty')->willReturn($canSubtract);
-        return new ReportCompensationsPlugin($notes, $configuration, $logger ?? $this->createMock(LoggerInterface::class));
+        return new ReportCompensationsPlugin($notes, $configuration, $logger ?? $this->createStub(LoggerInterface::class));
     }
 
     private function command(): CreateCompensations
     {
-        return $this->createMock(CreateCompensations::class);
+        return $this->createStub(CreateCompensations::class);
     }
 }

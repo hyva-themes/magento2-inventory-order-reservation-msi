@@ -81,7 +81,7 @@ class CoordinateManualCompensationPluginTest extends TestCase
 
     public function test_a_failure_under_the_lock_is_logged_and_reaches_the_caller_without_its_text(): void
     {
-        $coordinated = $this->createMock(CoordinatedCompensation::class);
+        $coordinated = $this->createStub(CoordinatedCompensation::class);
         $coordinated->method('apply')->willThrowException(new \RuntimeException('SQLSTATE[45000]: simulated failure after the compensation write'));
         $notes = new CompensationRunNotes();
         $notes->open();
@@ -103,7 +103,7 @@ class CoordinateManualCompensationPluginTest extends TestCase
 
     public function test_a_failure_the_module_words_itself_keeps_its_text(): void
     {
-        $coordinated = $this->createMock(CoordinatedCompensation::class);
+        $coordinated = $this->createStub(CoordinatedCompensation::class);
         $coordinated->method('apply')->willThrowException(new LocalizedException(__('Magento Inventory is not available on this store.')));
         $logger = $this->createMock(LoggerInterface::class);
         $logger->expects(self::never())->method('error');
@@ -120,7 +120,7 @@ class CoordinateManualCompensationPluginTest extends TestCase
     public function test_open_notes_record_the_outcomes_and_closed_notes_nothing(): void
     {
         $outcome = new Outcome(Outcome::APPLIED, 'mug', 2, -1.0, -1.0, 0.0, true);
-        $coordinated = $this->createMock(CoordinatedCompensation::class);
+        $coordinated = $this->createStub(CoordinatedCompensation::class);
         $coordinated->method('apply')->willReturn($outcome);
         $notes = new CompensationRunNotes();
         $plugin = $this->plugin($coordinated, $notes);
@@ -145,20 +145,20 @@ class CoordinateManualCompensationPluginTest extends TestCase
         ?CompensationRunNotes $notes = null,
         ?LoggerInterface $logger = null
     ): CoordinateManualCompensationPlugin {
-        $obligations = $this->createMock(ObligationResource::class);
+        $obligations = $this->createStub(ObligationResource::class);
         $obligations->method('hasRowsFor')->willReturnCallback(static fn (int $orderId): bool => $orderId === 9);
         return new CoordinateManualCompensationPlugin(
             $coordinated,
             $obligations,
             new Json(),
             $notes ?? new CompensationRunNotes(),
-            $logger ?? $this->createMock(LoggerInterface::class)
+            $logger ?? $this->createStub(LoggerInterface::class)
         );
     }
 
     private function subject(): AppendReservationsInterface
     {
-        return $this->createMock(AppendReservationsInterface::class);
+        return $this->createStub(AppendReservationsInterface::class);
     }
 
     private function noProceed(): \Closure
@@ -169,7 +169,7 @@ class CoordinateManualCompensationPluginTest extends TestCase
 
     private function reservation(string $metadata): ReservationInterface
     {
-        $reservation = $this->createMock(ReservationInterface::class);
+        $reservation = $this->createStub(ReservationInterface::class);
         $reservation->method('getMetadata')->willReturn($metadata);
         $reservation->method('getSku')->willReturn('mug');
         $reservation->method('getStockId')->willReturn(2);

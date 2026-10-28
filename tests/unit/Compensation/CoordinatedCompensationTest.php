@@ -112,7 +112,7 @@ class CoordinatedCompensationTest extends TestCase
     public function test_a_refused_row_is_settled_only_when_nothing_remains_on_any_stock(): void
     {
         // one unit shipped on each stock around a move: stock 2 repaired, stock 1 still lacks one
-        $remainingService = $this->createMock(RemainingInconsistency::class);
+        $remainingService = $this->createStub(RemainingInconsistency::class);
         $remainingService->method('forOrderSku')->willReturn(['expected' => 0.0, 'actual' => 1.0, 'remaining' => -1.0]);
         $remainingService->method('remaindersForRow')->willReturn([1 => -1.0, 2 => 0.0]);
         $obligations = $this->refusedRows();
@@ -152,7 +152,7 @@ class CoordinatedCompensationTest extends TestCase
 
     public function test_a_registration_that_fails_reaches_the_caller_with_nothing_judged(): void
     {
-        $registration = $this->createMock(StockRegistration::class);
+        $registration = $this->createStub(StockRegistration::class);
         $registration->method('registerLocked')->willThrowException(new LocalizedException(__('Some of the products are out of stock.')));
         $service = $this->service(registrationRan: true, remaining: -1.0, writer: $this->writer(expectRows: 0), registration: $registration);
 
@@ -293,16 +293,16 @@ class CoordinatedCompensationTest extends TestCase
         ?ObligationResource $obligations = null,
         ?StockRegistration $registration = null
     ): CoordinatedCompensation {
-        $mutex = $this->createMock(OrderMutexInterface::class);
+        $mutex = $this->createStub(OrderMutexInterface::class);
         $mutex->method('execute')->willReturnCallback(static fn (int $orderId, callable $callable, array $args) => $callable(...$args));
         if ($registration === null) {
-            $registration = $this->createMock(StockRegistration::class);
+            $registration = $this->createStub(StockRegistration::class);
             $registration->method('registerLocked')->willReturn($registrationRan);
         }
-        $orders = $this->createMock(OrderRepositoryInterface::class);
-        $orders->method('get')->willReturn($this->createMock(OrderInterface::class));
+        $orders = $this->createStub(OrderRepositoryInterface::class);
+        $orders->method('get')->willReturn($this->createStub(OrderInterface::class));
         if ($remainingService === null) {
-            $remainingService = $this->createMock(RemainingInconsistency::class);
+            $remainingService = $this->createStub(RemainingInconsistency::class);
             $remainingService->method('forOrderSku')->willReturn(['expected' => $remaining, 'actual' => 0.0, 'remaining' => $remaining]);
             // after a write of the whole remainder nothing is left on the one stock; a partial write leaves the rest
             $remainingService->method('remaindersForRow')->willReturnCallback(
@@ -350,7 +350,7 @@ class CoordinatedCompensationTest extends TestCase
 
     private function reservation(string $sku, int $stockId, float $qty): ReservationInterface
     {
-        $reservation = $this->createMock(ReservationInterface::class);
+        $reservation = $this->createStub(ReservationInterface::class);
         $reservation->method('getSku')->willReturn($sku);
         $reservation->method('getStockId')->willReturn($stockId);
         $reservation->method('getQuantity')->willReturn($qty);

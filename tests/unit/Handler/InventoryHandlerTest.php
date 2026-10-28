@@ -191,7 +191,7 @@ class InventoryHandlerTest extends TestCase
      */
     private function handler(array $remainingBySku, array $types = [], ?callable $managed = null, array $remaindersBySku = [], int $currentStock = 2): InventoryHandler
     {
-        $builder = $this->createMock(ReservationBuilderInterface::class);
+        $builder = $this->createStub(ReservationBuilderInterface::class);
         $row = [];
         $builder->method('setSku')->willReturnCallback(function (string $sku) use (&$row, $builder): ReservationBuilderInterface {
             $row['sku'] = $sku;
@@ -210,7 +210,7 @@ class InventoryHandlerTest extends TestCase
             return $builder;
         });
         $builder->method('build')->willReturnCallback(function () use (&$row): ReservationInterface {
-            $reservation = $this->createMock(ReservationInterface::class);
+            $reservation = $this->createStub(ReservationInterface::class);
             $reservation->method('getSku')->willReturn($row['sku']);
             $reservation->method('getQuantity')->willReturn($row['qty']);
             $reservation->method('getStockId')->willReturn($row['stock']);
@@ -220,25 +220,25 @@ class InventoryHandlerTest extends TestCase
             $this->written[] = $built;
             return $reservation;
         });
-        $writer = $this->createMock(AppendReservationsInterface::class);
+        $writer = $this->createStub(AppendReservationsInterface::class);
         $writer->method('execute')->willReturnCallback(function (array $reservations): void {
             $this->appends++;
         });
-        $events = $this->createMock(SalesEventInterfaceFactory::class);
+        $events = $this->createStub(SalesEventInterfaceFactory::class);
         $events->method('create')->willReturnCallback(function (array $data): SalesEventInterface {
-            $event = $this->createMock(SalesEventInterface::class);
+            $event = $this->createStub(SalesEventInterface::class);
             $event->method('getType')->willReturn($data['type']);
             $event->method('getObjectType')->willReturn($data['objectType']);
             $event->method('getObjectId')->willReturn($data['objectId']);
             return $event;
         });
         $incrementId = null;
-        $extensions = $this->createMock(SalesEventExtensionFactory::class);
+        $extensions = $this->createStub(SalesEventExtensionFactory::class);
         $extensions->method('create')->willReturnCallback(function (array $arguments) use (&$incrementId): SalesEventExtensionInterface {
             $incrementId = $arguments['data']['objectIncrementId'];
-            return $this->createMock(SalesEventExtensionInterface::class);
+            return $this->createStub(SalesEventExtensionInterface::class);
         });
-        $converter = $this->createMock(SalesEventToArrayConverter::class);
+        $converter = $this->createStub(SalesEventToArrayConverter::class);
         $converter->method('execute')->willReturnCallback(static function (SalesEventInterface $event) use (&$incrementId): array {
             return [
                 'event_type' => $event->getType(),
@@ -247,17 +247,17 @@ class InventoryHandlerTest extends TestCase
                 'object_increment_id' => $incrementId ?? '',
             ];
         });
-        $productTypes = $this->createMock(GetProductTypesBySkusInterface::class);
+        $productTypes = $this->createStub(GetProductTypesBySkusInterface::class);
         $productTypes->method('execute')->willReturnCallback(
             static fn (array $skus): array => array_intersect_key($types + array_fill_keys($skus, 'simple'), array_flip($skus)) + ($types === [] ? array_fill_keys($skus, 'simple') : [])
         );
         if ($types !== []) {
-            $productTypes = $this->createMock(GetProductTypesBySkusInterface::class);
+            $productTypes = $this->createStub(GetProductTypesBySkusInterface::class);
             $productTypes->method('execute')->willReturnCallback(static fn (array $skus): array => array_intersect_key($types, array_flip($skus)));
         }
-        $allowed = $this->createMock(IsSourceItemManagementAllowedForProductTypeInterface::class);
+        $allowed = $this->createStub(IsSourceItemManagementAllowedForProductTypeInterface::class);
         $allowed->method('execute')->willReturnCallback(static fn (string $type): bool => $managed === null || $managed($type));
-        $remaining = $this->createMock(RemainingInconsistency::class);
+        $remaining = $this->createStub(RemainingInconsistency::class);
         $remaining->method('remaindersForRow')->willReturnCallback(
             static fn (object $order, string $sku, int $recordedStock): array => $remaindersBySku[$sku] ?? [$recordedStock => $remainingBySku[$sku] ?? 0.0]
         );
@@ -280,7 +280,7 @@ class InventoryHandlerTest extends TestCase
 
     private function order(int $id, string $increment): Order
     {
-        $order = $this->getMockBuilder(Order::class)->disableOriginalConstructor()->onlyMethods(['getEntityId', 'getIncrementId'])->getMock();
+        $order = $this->createStub(Order::class);
         $order->method('getEntityId')->willReturn($id);
         $order->method('getIncrementId')->willReturn($increment);
         return $order;
