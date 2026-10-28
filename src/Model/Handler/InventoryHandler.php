@@ -13,6 +13,7 @@ use Hyva\InventoryOrderReservation\Model\Handler\HandlerInterface;
 use Hyva\InventoryOrderReservation\Model\Handler\RowOutcome;
 use Hyva\InventoryOrderReservation\Model\Obligation;
 use Hyva\InventoryOrderReservationMsi\Model\Compensation\RemainingInconsistency;
+use Hyva\InventoryOrderReservationMsi\Model\Compensation\Rename;
 use Magento\Framework\Serialize\SerializerInterface;
 use Magento\InventoryCatalogApi\Model\GetProductTypesBySkusInterface;
 use Magento\InventoryConfigurationApi\Model\IsSourceItemManagementAllowedForProductTypeInterface;
@@ -49,7 +50,10 @@ use Magento\Sales\Api\Data\OrderInterface;
  * the row is refused naming each stock and its remainder, since the
  * writer repairs the recorded stock only and only downward, and a
  * compensation on each stock named repairs it. The order's other rows
- * are placed in the same run.
+ * are placed in the same run. A row whose product the catalog renamed
+ * since it was recorded is judged and placed under the new sku once
+ * Magento Inventory has moved the order's reservations there, and
+ * refused until then (Rename).
  */
 class InventoryHandler implements HandlerInterface
 {
@@ -73,40 +77,9 @@ class InventoryHandler implements HandlerInterface
      */
     public function register(OrderInterface $order, array $owed): array
     {
-        // one answer per row, in the rows' order; what is to be placed is decided first and written in one append
-        $outcomes = [];
-        $toPlace = [];
-        foreach ($owed as $index => $obligation) {
-            if ($obligation->qtyOrdered <= 0) {
-                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
-                continue;
-            }
-            if ($obligation->stockId === null) {
-                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: (string) __(
-                    'The website was assigned to no stock when the order was recorded; there is no stock to read the remainder on.'
-                ));
-                continue;
-            }
-            // what remains on every stock that matters to the row: the recorded
-            // stock, the stock the website sells from now, every stock with a row
-            $remainders = $this->remaining->remaindersForRow($order, $obligation->sku, $obligation->stockId);
-            $nonZero = array_filter($remainders, static fn (float $remaining): bool => abs($remaining) >= Obligation::TOLERANCE);
-            if ($nonZero === []) {
-                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
-                continue;
-            }
-            $onRecorded = $remainders[$obligation->stockId];
-            if (count($nonZero) === 1 && isset($nonZero[$obligation->stockId]) && $onRecorded < 0) {
-                $toPlace[$index] = [$obligation, $onRecorded];
-                continue;
-            }
-            $outcomes[$index] = new RowOutcome(
-                $obligation,
-                RowOutcome::REFUSED,
-                reason: $this->refusal($obligation, $nonZero, $this->remaining->currentStockId($order)),
-                remainders: $nonZero
-            );
-        }
+        // one answer per row, in the rows' order; what is to be placed is
+        // decided first, with the order's reads memoized, and written in one append
+        [$outcomes, $toPlace] = $this->remaining->memoized(fn (): array => $this->decide($order, $owed));
         if ($toPlace === []) {
             ksort($outcomes);
             return array_values($outcomes);
@@ -114,17 +87,17 @@ class InventoryHandler implements HandlerInterface
         // Magento's own filter, as its placement service applies it: a sku
         // the catalog does not hold is written, a sku whose type allows no
         // source-item management is not, and its row is balanced
-        $types = $this->getProductTypesBySkus->execute(array_values(array_map(static fn (array $pair): string => $pair[0]->sku, $toPlace)));
+        $types = $this->getProductTypesBySkus->execute(array_values(array_map(static fn (array $placement): string => $placement[1], $toPlace)));
         $metadata = $this->serializer->serialize($this->salesEventToArrayConverter->execute($this->salesEvent($order)));
         $rows = [];
-        foreach ($toPlace as $index => [$obligation, $remaining]) {
-            $type = $types[$obligation->sku] ?? null;
+        foreach ($toPlace as $index => [$obligation, $sku, $remaining]) {
+            $type = $types[$sku] ?? null;
             if ($type !== null && !$this->isSourceItemManagementAllowedForProductType->execute((string) $type)) {
                 $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
                 continue;
             }
             $rows[] = $this->reservationBuilder
-                ->setSku($obligation->sku)
+                ->setSku($sku)
                 ->setQuantity($remaining)
                 ->setStockId($obligation->stockId)
                 ->setMetadata($metadata)
@@ -139,11 +112,76 @@ class InventoryHandler implements HandlerInterface
     }
 
     /**
+     * The answer for each row that is not placed, and what is placed for the others, read before anything is written.
+     *
+     * @param Obligation[] $owed
+     * @return array{0: array<int, RowOutcome>, 1: array<int, array{0: Obligation, 1: string, 2: float}>}
+     *         the outcomes by row index, and the row, the sku and the quantity to place by row index
+     */
+    private function decide(OrderInterface $order, array $owed): array
+    {
+        $outcomes = [];
+        $toPlace = [];
+        foreach ($owed as $index => $obligation) {
+            if ($obligation->qtyOrdered <= 0) {
+                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
+                continue;
+            }
+            if ($obligation->stockId === null) {
+                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: (string) __(
+                    'The website was assigned to no stock when the order was recorded; there is no stock to read the remainder on.'
+                ));
+                continue;
+            }
+            $rename = $this->remaining->rename($order, $obligation);
+            if ($rename !== null && !$rename->isFollowed()) {
+                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: $this->renameRefusal($rename, $obligation->orderId));
+                continue;
+            }
+            // a renamed row whose reservations Magento moved to the new sku is
+            // judged and placed there, where its shipment deducts
+            $sku = $rename?->currentSku ?? $obligation->sku;
+            if ($this->remaining->hasAmbiguousRows($order, $sku)) {
+                // a row that may be this order's is counted for none: placing
+                // as if it were not there could reserve the quantity twice
+                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: (string) __(
+                    'Sku %1: a reservation names only the order number %2, which orders of several stores carry, so whose it is cannot be told and nothing is placed. '
+                    . 'inventory:order-reservation:settle %3 closes the row once the stock is corrected by hand.',
+                    $sku,
+                    (string) $order->getIncrementId(),
+                    $obligation->orderId
+                ));
+                continue;
+            }
+            // what remains on every stock that matters to the row: the recorded
+            // stock, the stock the website sells from now, every stock with a row
+            $remainders = $this->remaining->remaindersForRow($order, $sku, $obligation->stockId, $obligation->productId);
+            $nonZero = array_filter($remainders, static fn (float $remaining): bool => abs($remaining) >= Obligation::TOLERANCE);
+            if ($nonZero === []) {
+                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::BALANCED);
+                continue;
+            }
+            $onRecorded = $remainders[$obligation->stockId];
+            if (count($nonZero) === 1 && isset($nonZero[$obligation->stockId]) && $onRecorded < 0) {
+                $toPlace[$index] = [$obligation, $sku, $onRecorded];
+                continue;
+            }
+            $outcomes[$index] = new RowOutcome(
+                $obligation,
+                RowOutcome::REFUSED,
+                reason: $this->refusal($obligation, $sku, $nonZero, $this->remaining->currentStockId($order)),
+                remainders: $nonZero
+            );
+        }
+        return [$outcomes, $toPlace];
+    }
+
+    /**
      * Why a row cannot be placed: each stock with a remainder and the compensation that repairs it, and the move when the website sells from another stock than the one recorded.
      *
      * @param array<int, float> $nonZero stock id => remaining
      */
-    private function refusal(Obligation $obligation, array $nonZero, int $currentStockId): string
+    private function refusal(Obligation $obligation, string $sku, array $nonZero, int $currentStockId): string
     {
         $parts = [];
         foreach ($nonZero as $stockId => $remaining) {
@@ -154,7 +192,34 @@ class InventoryHandler implements HandlerInterface
         $moved = $currentStockId !== $obligation->stockId
             ? (string) __('the website sells from stock %1 now and the order was recorded on stock %2; ', $currentStockId, $obligation->stockId)
             : '';
-        return (string) __('Sku %1: %2%3. Nothing is placed.', $obligation->sku, $moved, implode('; ', $parts));
+        return (string) __('Sku %1: %2%3. Nothing is placed.', $sku, $moved, implode('; ', $parts));
+    }
+
+    /**
+     * Why a renamed row is not placed yet, and the step that moves it on.
+     */
+    private function renameRefusal(Rename $rename, int $orderId): string
+    {
+        if ($rename->state === Rename::PENDING) {
+            return (string) __(
+                'Sku %1 is %2 in the catalog now, and the order\'s reservations are still under %1, so nothing is placed. '
+                . 'Magento Inventory moves them to %2 through its inventory.reservations.update consumer: '
+                . 'run bin/magento queue:consumers:start inventory.reservations.update, then inventory:order-reservation:run %3. '
+                . 'Should they stay under %1 after that, the product was renamed while Synchronize with Catalog was off, '
+                . 'and inventory:order-reservation:settle %3 closes the row.',
+                $rename->recordedSku,
+                $rename->currentSku,
+                $orderId
+            );
+        }
+        return (string) __(
+            'Sku %1 is %2 in the catalog now, and with Synchronize with Catalog off Magento Inventory does not move reservations to a renamed sku, so nothing is placed. '
+            . 'Turn it on (Stores > Configuration > Catalog > Inventory > Stock Options), then inventory:order-reservation:run %3 '
+            . 'places the row under %2 when no reservation of the order is left under %1; inventory:order-reservation:settle %3 closes the row otherwise.',
+            $rename->recordedSku,
+            $rename->currentSku,
+            $orderId
+        );
     }
 
     /**

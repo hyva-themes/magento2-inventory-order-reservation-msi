@@ -41,9 +41,15 @@ if ($autoload === null) {
 $loader = require $autoload;
 $loader->addPsr4('Hyva\\InventoryOrderReservationMsi\\', $packageRoot . '/src/', true);
 $loader->addPsr4('Hyva\\InventoryOrderReservationMsi\\Test\\Unit\\', $packageRoot . '/tests/unit/', true);
-if (!class_exists(\Hyva\InventoryOrderReservation\Model\Obligation::class)) {
-    // the core package from a sibling checkout, when the borrowed vendor does not hold it
-    $loader->addPsr4('Hyva\\InventoryOrderReservation\\', realpath($packageRoot . '/../inventory-order-reservation/src') . '/', true);
+// the core package from a sibling checkout, for a borrowed vendor that does not
+// hold it. Appended, so a core in the vendor still wins. No class_exists() check
+// first: Composer remembers a class it failed to find, and would not look again.
+foreach (['magento2-inventory-order-reservation', 'inventory-order-reservation'] as $sibling) {
+    $siblingSrc = realpath($packageRoot . '/../' . $sibling . '/src');
+    if ($siblingSrc !== false) {
+        $loader->addPsr4('Hyva\\InventoryOrderReservation\\', $siblingSrc . '/');
+        break;
+    }
 }
 $generated = sys_get_temp_dir() . '/hyva-inventory-order-reservation-msi-generated';
 $autoloader = new GeneratedClassesAutoloader(

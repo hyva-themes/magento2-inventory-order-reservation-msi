@@ -11,7 +11,7 @@ composer require hyva-themes/magento2-inventory-order-reservation hyva-themes/ma
 bin/magento setup:upgrade
 ```
 
-The package requires the MSI modules it uses (`magento/module-inventory-sales`, `-reservations`, `-catalog`, `-configuration` and `-reservation-cli`) and the core module at `^1.0`.
+The package requires the MSI modules it uses (`magento/module-inventory-sales`, `-reservations`, `-catalog`, `-configuration` and `-reservation-cli`) and the core module at `^0.1`.
 
 If your store removed MSI with `yireo/magento2-replace-inventory`, Composer will refuse to install this package. That is on purpose. A replace package tells Composer the MSI modules are present, so without the conflict the install would go through and `setup:di:compile` would break on the missing interfaces. Stores without MSI install the core module alone.
 
@@ -30,6 +30,8 @@ Before writing, we look at every stock that matters for a sku: the stock the ord
 - Nothing is missing anywhere: the sku is done, nothing is written.
 - The only thing missing is on the recorded stock: we place it there.
 - Something is missing on another stock, or the recorded stock holds more than the order owes: we refuse that sku and say which stock is off by how much. `inventory:order-reservation:list` shows the reason, and a manual compensation on the stock named fixes it.
+- The product was renamed in the catalog since the order was recorded. With **Synchronize with Catalog** on (Stores > Configuration > Catalog > Inventory > Stock Options), Magento Inventory moves every reservation of the old sku to the new one through its `inventory.reservations.update` queue consumer. Once no reservation of the order is left under the old sku, we treat the sku as the new one: we read what remains and place it under the new sku, and a manual compensation for it is made under the new sku. While a reservation of the order is still under the old sku (the consumer has not run), or with the setting off, we refuse that sku and its compensations, and the reason names the next step: start the consumer and run the order again, or turn the setting on. If the reservations never move (the product was renamed while the setting was off), `inventory:order-reservation:settle` closes the row.
+- A reservation for the sku names only the order number, not the order's id, and orders of several stores carry that number: we refuse that sku as well, and a compensation for it. The reservation can't be assigned to one of those orders, so counting it for none could reserve the quantity twice. Magento's own writers always name the order's id, so this only happens with reservations from third-party code. `inventory:order-reservation:settle` closes the row.
 
 The refusal is deliberate. We only write to the recorded stock, and only downward. If the website was moved to another stock between the order and its registration, or a shipment was split over two stocks, completing the order on today's mapping would hide a discrepancy. Refusing keeps it visible until someone compensates it. The other skus of the order are placed in the same run.
 
@@ -55,7 +57,7 @@ Magento's reservation cleanup deletes balanced rows. We never read those rows to
 
 Every class in this package names the MSI interfaces it needs in its constructor. The module is sequenced on the MSI modules, so it only loads where they exist.
 
-Unit tests run against a Magento vendor directory that has MSI and the core module installed, or the core checked out next to this package:
+Unit tests run against a Magento vendor directory that has MSI installed. The core module comes from that vendor directory, or from a checkout of it next to this package (`../magento2-inventory-order-reservation`):
 
 ```sh
 MAGENTO_VENDOR_PATH=/path/to/magento/vendor/autoload.php php phpunit-10.phar

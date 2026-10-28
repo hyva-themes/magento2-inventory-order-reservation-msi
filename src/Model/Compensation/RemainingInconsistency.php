@@ -9,8 +9,11 @@ declare(strict_types=1);
 
 namespace Hyva\InventoryOrderReservationMsi\Model\Compensation;
 
+use Hyva\InventoryOrderReservation\Model\Obligation;
+use Hyva\InventoryOrderReservation\Model\ProductIdentities;
 use Hyva\InventoryOrderReservation\Model\ResourceModel\WebsiteStock;
 use Magento\Catalog\Model\Product\Type\AbstractType;
+use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\App\ResourceConnection;
 use Magento\InventoryConfigurationApi\Api\GetStockItemConfigurationInterface;
 use Magento\InventoryConfigurationApi\Model\IsSourceItemManagementAllowedForProductTypeInterface;
@@ -33,25 +36,107 @@ use Magento\Store\Api\WebsiteRepositoryInterface;
  * on any stock that matters to it: the stock it was recorded on, the
  * stock the website sells from now, and every stock holding a row for
  * the order and sku.
+ *
+ * A line is counted under the product that holds its stock, as Magento's
+ * placement resolves it (GetSkuFromOrderItem) and as the core's recorder
+ * recorded the row: the catalog's sku and type for the line's product id.
+ * A line with custom options carries a sku of its own ("SHIRT-engr"), a
+ * grouped product's child carries the type "grouped", and a composite
+ * parent line carries its child's sku; read by the product, each lands
+ * where its reservation does. A line whose product the catalog no longer
+ * holds keeps its own sku and type, with "grouped" counted as Magento's
+ * listing counts it. Given the product id a row was recorded for, the
+ * lines are those of that product, so a sku the catalog renamed since
+ * still finds them.
  */
 class RemainingInconsistency
 {
+    private const GROUPED = 'grouped';
+    /** The setting under which Magento Inventory moves reservations to a renamed sku (UpdateReservationsPlugin). */
+    private const XML_PATH_SYNCHRONIZE_WITH_CATALOG = 'cataloginventory/options/synchronize_with_catalog';
+
+    /**
+     * @var array{unique: array<string, bool>, stocks: int[]|null, products: array<int, array{sku: string, type: string}|null>}|null
+     *      the reads of the running memoized() call, null outside one
+     */
+    private ?array $memo = null;
+
     public function __construct(
         private readonly ResourceConnection $resourceConnection,
         private readonly IsSourceItemManagementAllowedForProductTypeInterface $managementAllowed,
         private readonly GetStockItemConfigurationInterface $stockItemConfiguration,
         private readonly WebsiteStock $websiteStock,
-        private readonly WebsiteRepositoryInterface $websiteRepository
+        private readonly WebsiteRepositoryInterface $websiteRepository,
+        private readonly ProductIdentities $products,
+        private readonly ScopeConfigInterface $scopeConfig
     ) {
+    }
+
+    /**
+     * Runs $read with the reads it repeats per row and per stock memoized for its duration: whether an order number is unique, the stocks holding reservations, the catalog's sku and type per product.
+     *
+     * A caller holds the order's lock and writes nothing within the call,
+     * so these stay as read; the memo ends with the call, and a read after
+     * a write goes to the database again. A call within a call has a memo
+     * of its own.
+     *
+     * @template T
+     * @param callable(): T $read
+     * @return T
+     */
+    public function memoized(callable $read): mixed
+    {
+        $outer = $this->memo;
+        $this->memo = ['unique' => [], 'stocks' => null, 'products' => []];
+        try {
+            return $read();
+        } finally {
+            $this->memo = $outer;
+        }
     }
 
     /** @return array{expected: float, actual: float, remaining: float}
      */
-    public function forOrderSku(OrderInterface $order, string $sku, int $stockId): array
+    public function forOrderSku(OrderInterface $order, string $sku, int $stockId, ?int $productId = null): array
     {
-        $expected = $this->expectedSum($order, $sku, $stockId);
+        $expected = $this->expectedSum($order, $sku, $stockId, $productId);
         $actual = $this->actualSum((int) $order->getEntityId(), (string) $order->getIncrementId(), $sku, $stockId);
         return ['expected' => $expected, 'actual' => $actual, 'remaining' => round($expected - $actual, 4)];
+    }
+
+    /**
+     * The sku the catalog gives the row's product now, when it differs from the sku the row was recorded under; null when it does not, or the row names no product the catalog holds.
+     */
+    public function renamedTo(Obligation $row): ?string
+    {
+        if ($row->productId === null) {
+            return null;
+        }
+        $current = $this->identities([$row->productId])[$row->productId]['sku'] ?? null;
+        return $current !== null && $current !== $row->sku ? $current : null;
+    }
+
+    /**
+     * Where the order's reservations for a renamed row are now (Rename); null when the row was not renamed.
+     *
+     * Magento Inventory moves the reservations of a renamed sku itself, all
+     * of them, through a queue consumer, and only with Synchronize with
+     * Catalog on (a default-scope setting, read as its plugin reads it). So
+     * the setting on and no row of the order left under the recorded sku
+     * means the consumer ran and the row is the catalog's sku's now.
+     */
+    public function rename(OrderInterface $order, Obligation $row): ?Rename
+    {
+        $current = $this->renamedTo($row);
+        if ($current === null) {
+            return null;
+        }
+        if (!$this->scopeConfig->isSetFlag(self::XML_PATH_SYNCHRONIZE_WITH_CATALOG)) {
+            return new Rename($row->sku, $current, Rename::NOT_SYNCHRONIZED);
+        }
+        $rowsRemain = $this->stocksWithRows((int) $order->getEntityId(), (string) $order->getIncrementId(), $row->sku) !== []
+            || $this->hasAmbiguousRows($order, $row->sku);
+        return new Rename($row->sku, $current, $rowsRemain ? Rename::PENDING : Rename::FOLLOWED);
     }
 
     /**
@@ -59,7 +144,7 @@ class RemainingInconsistency
      *
      * @return array<int, float> stock id => remaining, ascending by stock id
      */
-    public function remaindersForRow(OrderInterface $order, string $sku, int $recordedStockId): array
+    public function remaindersForRow(OrderInterface $order, string $sku, int $recordedStockId, ?int $productId = null): array
     {
         $stocks = array_unique(array_merge(
             [$recordedStockId, $this->currentStockId($order)],
@@ -68,7 +153,7 @@ class RemainingInconsistency
         sort($stocks);
         $remainders = [];
         foreach ($stocks as $stockId) {
-            $remainders[$stockId] = $this->forOrderSku($order, $sku, $stockId)['remaining'];
+            $remainders[$stockId] = $this->forOrderSku($order, $sku, $stockId, $productId)['remaining'];
         }
         return $remainders;
     }
@@ -85,7 +170,7 @@ class RemainingInconsistency
     /**
      * The reservation sum Magento expects for the sku on this order on a stock: zero in a final state and on any stock but the one the website sells from now, else minus what is ordered and neither canceled, refunded nor shipped (invoiced for a virtual line), for the product types Inventory manages.
      */
-    public function expectedSum(OrderInterface $order, string $sku, ?int $stockId = null): float
+    public function expectedSum(OrderInterface $order, string $sku, ?int $stockId = null, ?int $productId = null): float
     {
         if (in_array((string) $order->getState(), [Order::STATE_COMPLETE, Order::STATE_CLOSED, Order::STATE_CANCELED], true)) {
             return 0.0;
@@ -98,13 +183,32 @@ class RemainingInconsistency
         if (!$this->isManaged($sku, $stockId)) {
             return 0.0;
         }
+        $items = $order->getItems();
+        $identities = $this->identities(array_map(static fn (OrderItemInterface $item): int => (int) $item->getProductId(), $items));
         $qty = 0.0;
-        foreach ($order->getItems() as $item) {
-            if ((string) $item->getSku() !== $sku) {
-                continue;
+        foreach ($items as $item) {
+            $identity = $identities[(int) $item->getProductId()] ?? null;
+            if ($productId !== null) {
+                // the row's own product, whatever the catalog calls it today
+                if ((int) $item->getProductId() !== $productId
+                    || ($identity !== null && ProductIdentities::isComposite($identity['type']))
+                ) {
+                    continue;
+                }
+                $type = $identity['type'] ?? (string) $item->getProductType();
+            } elseif ($identity !== null) {
+                if ($identity['sku'] !== $sku || ProductIdentities::isComposite($identity['type'])) {
+                    continue;
+                }
+                $type = $identity['type'];
+            } else {
+                if ((string) $item->getSku() !== $sku) {
+                    continue;
+                }
+                $type = (string) $item->getProductType();
             }
-            $type = (string) $item->getProductType();
-            if ($type !== '' && !$this->managementAllowed->execute($type)) {
+            // Magento's listing counts a grouped product's child under the line type "grouped"
+            if ($type !== '' && $type !== self::GROUPED && !$this->managementAllowed->execute($type)) {
                 continue;
             }
             $progress = $this->progress($item);
@@ -164,42 +268,170 @@ class RemainingInconsistency
     }
 
     /**
-     * The stocks holding a row for the order and sku, whichever spelling of the order's id the writer used.
+     * The stocks holding a row for the order and sku (rowsOfOrder()).
      *
      * @return int[]
      */
     private function stocksWithRows(int $orderId, string $incrementId, string $sku): array
     {
         $connection = $this->resourceConnection->getConnection();
+        $stockIds = $this->stockIdsWithRows();
+        if ($stockIds === []) {
+            return [];
+        }
         $select = $connection->select()
             ->distinct()
             ->from($this->resourceConnection->getTableName('inventory_reservation'), ['stock_id'])
+            ->where('stock_id IN (?)', $stockIds)
             ->where('sku = ?', $sku)
-            ->where(
-                "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id')) = " . $connection->quote((string) $orderId)
-                . " OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = " . $connection->quote($incrementId)
-            );
+            ->where($this->rowsOfOrder($orderId, $incrementId));
         return array_map('intval', $connection->fetchCol($select));
     }
 
     /**
-     * The sum of the reservation rows on record for the order and sku on the stock, whichever spelling of the order's id the writer used.
+     * The sum of the reservation rows on record for the order and sku on the stock (rowsOfOrder()).
      */
     private function actualSum(int $orderId, string $incrementId, string $sku, int $stockId): float
     {
         $connection = $this->resourceConnection->getConnection();
         $table = $this->resourceConnection->getTableName('inventory_reservation');
-        // the writers spell the order's id as a string or a number, and some
-        // name the increment id; read as JSON, so an id that is a prefix of
-        // another, or holds a character the JSON escapes, matches itself only
         $select = $connection->select()
             ->from($table, ['total' => 'COALESCE(SUM(quantity), 0)'])
             ->where('sku = ?', $sku)
             ->where('stock_id = ?', $stockId)
-            ->where(
-                "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id')) = " . $connection->quote((string) $orderId)
-                . " OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = " . $connection->quote($incrementId)
-            );
+            ->where($this->rowsOfOrder($orderId, $incrementId));
         return (float) $connection->fetchOne($select);
+    }
+
+    /**
+     * Whether a reservation row for the sku names the order only by an increment id that orders of several stores carry.
+     *
+     * Such a row cannot be told apart between those orders (its metadata
+     * names no store), so it is counted for none of them; registering or
+     * compensating the sku as if it were not there could reserve the
+     * quantity a second time. Its caller refuses the row instead.
+     */
+    public function hasAmbiguousRows(OrderInterface $order, string $sku): bool
+    {
+        $incrementId = (string) $order->getIncrementId();
+        if ($incrementId === '' || $this->isUniqueIncrementId($incrementId)) {
+            return false;
+        }
+        $stockIds = $this->stockIdsWithRows();
+        if ($stockIds === []) {
+            return false;
+        }
+        $connection = $this->resourceConnection->getConnection();
+        $select = $connection->select()
+            ->from($this->resourceConnection->getTableName('inventory_reservation'), ['count' => 'COUNT(*)'])
+            ->where('stock_id IN (?)', $stockIds)
+            ->where('sku = ?', $sku)
+            ->where($this->namesNoEntityId())
+            ->where("JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = ?", $incrementId);
+        return (int) $connection->fetchOne($select) > 0;
+    }
+
+    /**
+     * The stocks that hold any reservation row.
+     *
+     * The reservation table's only index leads with the stock id, so a
+     * lookup by sku names the stocks: a filter on the sku alone reads the
+     * whole table. They are read off that index (a loose scan, one entry
+     * per stock), not off inventory_stock, so rows on a stock deleted since
+     * still count.
+     *
+     * @return int[]
+     */
+    private function stockIdsWithRows(): array
+    {
+        if ($this->memo !== null) {
+            return $this->memo['stocks'] ??= $this->readStockIdsWithRows();
+        }
+        return $this->readStockIdsWithRows();
+    }
+
+    /**
+     * @return int[]
+     */
+    private function readStockIdsWithRows(): array
+    {
+        $connection = $this->resourceConnection->getConnection();
+        $table = $this->resourceConnection->getTableName('inventory_reservation');
+        return array_map('intval', $connection->fetchCol($connection->select()->distinct()->from($table, ['stock_id'])));
+    }
+
+    /**
+     * The condition on inventory_reservation.metadata for a row that names no order entity id.
+     */
+    private function namesNoEntityId(): string
+    {
+        return "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id')), '') IN ('', '0', 'null')";
+    }
+
+    /**
+     * The condition on inventory_reservation.metadata that picks the order's own rows.
+     *
+     * A row naming an order entity id (every writer of Magento's does, as a
+     * string or a number) belongs to that order alone, so another store's
+     * order with the same increment id never counts here: Magento keeps an
+     * increment id unique per store only. A row naming no entity id is
+     * matched by its increment id, and only while no other order carries
+     * that increment id; an ambiguous one is counted for neither order, and
+     * hasAmbiguousRows() tells its callers to refuse the sku.
+     * Read as JSON, so an id that is a prefix of another, or holds a
+     * character the JSON escapes, matches itself only.
+     */
+    private function rowsOfOrder(int $orderId, string $incrementId): string
+    {
+        $connection = $this->resourceConnection->getConnection();
+        $objectId = "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id'))";
+        $condition = $objectId . ' = ' . $connection->quote((string) $orderId);
+        if ($incrementId !== '' && $this->isUniqueIncrementId($incrementId)) {
+            $condition .= ' OR (' . $this->namesNoEntityId()
+                . " AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = " . $connection->quote($incrementId) . ')';
+        }
+        return $condition;
+    }
+
+    /**
+     * Whether a single order carries the increment id, across every store.
+     */
+    private function isUniqueIncrementId(string $incrementId): bool
+    {
+        if ($this->memo !== null) {
+            return $this->memo['unique'][$incrementId] ??= $this->readIsUniqueIncrementId($incrementId);
+        }
+        return $this->readIsUniqueIncrementId($incrementId);
+    }
+
+    private function readIsUniqueIncrementId(string $incrementId): bool
+    {
+        $connection = $this->resourceConnection->getConnection('sales');
+        $select = $connection->select()
+            ->from($this->resourceConnection->getTableName('sales_order'), ['count' => 'COUNT(*)'])
+            ->where('increment_id = ?', $incrementId);
+        return (int) $connection->fetchOne($select) <= 1;
+    }
+
+    /**
+     * The catalog's sku and type by product id (ProductIdentities), each product read once within a memoized() call.
+     *
+     * @param array<int|string|null> $productIds
+     * @return array<int, array{sku: string, type: string}>
+     */
+    private function identities(array $productIds): array
+    {
+        if ($this->memo === null) {
+            return $this->products->byProductIds($productIds);
+        }
+        $ids = array_values(array_unique(array_map('intval', $productIds)));
+        $unread = array_values(array_diff($ids, array_keys($this->memo['products'])));
+        if ($unread !== []) {
+            $read = $this->products->byProductIds($unread);
+            foreach ($unread as $id) {
+                $this->memo['products'][$id] = $read[$id] ?? null;
+            }
+        }
+        return array_filter(array_intersect_key($this->memo['products'], array_flip($ids)));
     }
 }
