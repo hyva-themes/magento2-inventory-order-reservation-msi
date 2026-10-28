@@ -143,6 +143,18 @@ class CoordinatedCompensationTest extends TestCase
         }
     }
 
+    public function test_a_compensation_is_refused_while_a_reservation_of_an_ambiguous_order_number_exists(): void
+    {
+        $obligations = $this->refusedRows();
+        $obligations->expects(self::never())->method('markRowDone');
+        $service = $this->service(registrationRan: false, remaining: -1.0, writer: $this->writer(expectRows: 0), obligations: $obligations, ambiguous: true);
+
+        $outcome = $service->apply(9, $this->reservation('mug', 2, -1.0));
+
+        self::assertTrue($outcome->isRefused());
+        self::assertStringContainsString('names only the order number', $outcome->reason);
+    }
+
     public function test_a_refused_row_is_judged_without_registering_the_orders_other_rows(): void
     {
         $registration = $this->createMock(StockRegistration::class);
@@ -311,7 +323,8 @@ class CoordinatedCompensationTest extends TestCase
         ?Obligation $obligation = null,
         ?ObligationResource $obligations = null,
         ?StockRegistration $registration = null,
-        ?string $renamedTo = null
+        ?string $renamedTo = null,
+        bool $ambiguous = false
     ): CoordinatedCompensation {
         $mutex = $this->createStub(OrderMutexInterface::class);
         $mutex->method('execute')->willReturnCallback(static fn (int $orderId, callable $callable, array $args) => $callable(...$args));
@@ -325,6 +338,7 @@ class CoordinatedCompensationTest extends TestCase
             $remainingService = $this->createStub(RemainingInconsistency::class);
             $remainingService->method('forOrderSku')->willReturn(['expected' => $remaining, 'actual' => 0.0, 'remaining' => $remaining]);
             $remainingService->method('renamedTo')->willReturn($renamedTo);
+            $remainingService->method('hasAmbiguousRows')->willReturn($ambiguous);
             // after a write of the whole remainder nothing is left on the one stock; a partial write leaves the rest
             $remainingService->method('remaindersForRow')->willReturnCallback(
                 static fn (): array => [2 => $remaining + 1.0 < -Obligation::TOLERANCE ? round($remaining + 1.0, 4) : 0.0]

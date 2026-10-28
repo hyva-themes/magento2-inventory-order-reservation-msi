@@ -224,19 +224,14 @@ class RemainingInconsistency
     private function stocksWithRows(int $orderId, string $incrementId, string $sku): array
     {
         $connection = $this->resourceConnection->getConnection();
-        // the reservation table's only index leads with the stock id, so the
-        // stocks are named: a filter on the sku alone reads the whole table.
-        // They are read off that index (a loose scan, one entry per stock),
-        // not off inventory_stock, so rows on a stock deleted since still count.
-        $table = $this->resourceConnection->getTableName('inventory_reservation');
-        $stockIds = $connection->fetchCol($connection->select()->distinct()->from($table, ['stock_id']));
+        $stockIds = $this->stockIdsWithRows();
         if ($stockIds === []) {
             return [];
         }
         $select = $connection->select()
             ->distinct()
-            ->from($table, ['stock_id'])
-            ->where('stock_id IN (?)', array_map('intval', $stockIds))
+            ->from($this->resourceConnection->getTableName('inventory_reservation'), ['stock_id'])
+            ->where('stock_id IN (?)', $stockIds)
             ->where('sku = ?', $sku)
             ->where($this->rowsOfOrder($orderId, $incrementId));
         return array_map('intval', $connection->fetchCol($select));
@@ -258,6 +253,60 @@ class RemainingInconsistency
     }
 
     /**
+     * Whether a reservation row for the sku names the order only by an increment id that orders of several stores carry.
+     *
+     * Such a row cannot be told apart between those orders (its metadata
+     * names no store), so it is counted for none of them; registering or
+     * compensating the sku as if it were not there could reserve the
+     * quantity a second time. Its caller refuses the row instead.
+     */
+    public function hasAmbiguousRows(OrderInterface $order, string $sku): bool
+    {
+        $incrementId = (string) $order->getIncrementId();
+        if ($incrementId === '' || $this->isUniqueIncrementId($incrementId)) {
+            return false;
+        }
+        $stockIds = $this->stockIdsWithRows();
+        if ($stockIds === []) {
+            return false;
+        }
+        $connection = $this->resourceConnection->getConnection();
+        $select = $connection->select()
+            ->from($this->resourceConnection->getTableName('inventory_reservation'), ['count' => 'COUNT(*)'])
+            ->where('stock_id IN (?)', $stockIds)
+            ->where('sku = ?', $sku)
+            ->where($this->namesNoEntityId())
+            ->where("JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = ?", $incrementId);
+        return (int) $connection->fetchOne($select) > 0;
+    }
+
+    /**
+     * The stocks that hold any reservation row.
+     *
+     * The reservation table's only index leads with the stock id, so a
+     * lookup by sku names the stocks: a filter on the sku alone reads the
+     * whole table. They are read off that index (a loose scan, one entry
+     * per stock), not off inventory_stock, so rows on a stock deleted since
+     * still count.
+     *
+     * @return int[]
+     */
+    private function stockIdsWithRows(): array
+    {
+        $connection = $this->resourceConnection->getConnection();
+        $table = $this->resourceConnection->getTableName('inventory_reservation');
+        return array_map('intval', $connection->fetchCol($connection->select()->distinct()->from($table, ['stock_id'])));
+    }
+
+    /**
+     * The condition on inventory_reservation.metadata for a row that names no order entity id.
+     */
+    private function namesNoEntityId(): string
+    {
+        return "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id')), '') IN ('', '0', 'null')";
+    }
+
+    /**
      * The condition on inventory_reservation.metadata that picks the order's own rows.
      *
      * A row naming an order entity id (every writer of Magento's does, as a
@@ -265,7 +314,8 @@ class RemainingInconsistency
      * order with the same increment id never counts here: Magento keeps an
      * increment id unique per store only. A row naming no entity id is
      * matched by its increment id, and only while no other order carries
-     * that increment id; an ambiguous one is counted for neither order.
+     * that increment id; an ambiguous one is counted for neither order, and
+     * hasAmbiguousRows() tells its callers to refuse the sku.
      * Read as JSON, so an id that is a prefix of another, or holds a
      * character the JSON escapes, matches itself only.
      */
@@ -275,7 +325,7 @@ class RemainingInconsistency
         $objectId = "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_id'))";
         $condition = $objectId . ' = ' . $connection->quote((string) $orderId);
         if ($incrementId !== '' && $this->isUniqueIncrementId($incrementId)) {
-            $condition .= " OR (COALESCE($objectId, '') IN ('', '0', 'null')"
+            $condition .= ' OR (' . $this->namesNoEntityId()
                 . " AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.object_increment_id')) = " . $connection->quote($incrementId) . ')';
         }
         return $condition;

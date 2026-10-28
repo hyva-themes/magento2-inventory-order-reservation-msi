@@ -101,6 +101,23 @@ class InventoryHandlerTest extends TestCase
         self::assertSame(0, $this->appends, 'nothing written under either sku');
     }
 
+    public function test_a_row_with_a_reservation_of_an_ambiguous_order_number_is_refused_not_placed_again(): void
+    {
+        // a reservation names only the order number, which another store's order carries too;
+        // counted for neither order, the row would read as owing the whole quantity
+        $handler = $this->handler(['mug' => -2.0, 'cup' => -1.0], ambiguousSkus: ['mug']);
+
+        $outcomes = $handler->register($this->order(9, '000000009'), [
+            new Obligation(9, 'mug', 'simple', 2.0, 1, 2, Obligation::MODE_INVENTORY),
+            new Obligation(9, 'cup', 'simple', 1.0, 1, 2, Obligation::MODE_INVENTORY),
+        ]);
+
+        self::assertSame(['mug' => 'refused', 'cup' => 'placed'], $this->kinds($outcomes));
+        self::assertStringContainsString('names only the order number 000000009', $outcomes[0]->reason);
+        self::assertStringContainsString('inventory:order-reservation:settle 9', $outcomes[0]->reason);
+        self::assertSame(['cup'], array_column($this->written, 'sku'), 'the other row is placed, mug is not');
+    }
+
     public function test_a_row_whose_product_keeps_its_sku_is_placed(): void
     {
         $handler = $this->handler(['mug' => -2.0], catalog: [10 => ['sku' => 'mug', 'type' => 'simple']]);
@@ -215,7 +232,7 @@ class InventoryHandlerTest extends TestCase
      * @param array<string, array<int, float>> $remaindersBySku the remainders per stock for a sku, when more than one stock matters
      * @param int $currentStock the stock the website sells from now
      */
-    private function handler(array $remainingBySku, array $types = [], ?callable $managed = null, array $remaindersBySku = [], int $currentStock = 2, array $catalog = []): InventoryHandler
+    private function handler(array $remainingBySku, array $types = [], ?callable $managed = null, array $remaindersBySku = [], int $currentStock = 2, array $catalog = [], array $ambiguousSkus = []): InventoryHandler
     {
         $builder = $this->createStub(ReservationBuilderInterface::class);
         $row = [];
@@ -288,6 +305,9 @@ class InventoryHandlerTest extends TestCase
             static fn (object $order, string $sku, int $recordedStock): array => $remaindersBySku[$sku] ?? [$recordedStock => $remainingBySku[$sku] ?? 0.0]
         );
         $remaining->method('currentStockId')->willReturn($currentStock);
+        $remaining->method('hasAmbiguousRows')->willReturnCallback(
+            static fn (object $order, string $sku): bool => in_array($sku, $ambiguousSkus, true)
+        );
         $remaining->method('renamedTo')->willReturnCallback(
             static fn (Obligation $row): ?string => $row->productId !== null && isset($catalog[$row->productId]) && $catalog[$row->productId]['sku'] !== $row->sku
                 ? $catalog[$row->productId]['sku']

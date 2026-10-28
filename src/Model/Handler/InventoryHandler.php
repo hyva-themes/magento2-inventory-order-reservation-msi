@@ -100,6 +100,18 @@ class InventoryHandler implements HandlerInterface
                 ));
                 continue;
             }
+            if ($this->remaining->hasAmbiguousRows($order, $obligation->sku)) {
+                // a row that may be this order's is counted for none: placing
+                // as if it were not there could reserve the quantity twice
+                $outcomes[$index] = new RowOutcome($obligation, RowOutcome::REFUSED, reason: (string) __(
+                    'Sku %1: a reservation names only the order number %2, which orders of several stores carry, so whose it is cannot be told and nothing is placed. '
+                    . 'inventory:order-reservation:settle %3 closes the row once the stock is corrected by hand.',
+                    $obligation->sku,
+                    (string) $order->getIncrementId(),
+                    $obligation->orderId
+                ));
+                continue;
+            }
             // what remains on every stock that matters to the row: the recorded
             // stock, the stock the website sells from now, every stock with a row
             $remainders = $this->remaining->remaindersForRow($order, $obligation->sku, $obligation->stockId, $obligation->productId);

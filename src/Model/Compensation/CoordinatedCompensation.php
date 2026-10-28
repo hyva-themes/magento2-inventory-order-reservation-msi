@@ -111,6 +111,16 @@ class CoordinatedCompensation
         // row on is balanced, which keeps a compensation off a stock the
         // order has nothing to do with
         $order = $this->orderRepository->get($orderId);
+        if ($this->remaining->hasAmbiguousRows($order, $sku)) {
+            // refused by the registration for the same reason: a row that may
+            // be this order's is counted for none, so the numbers below are not
+            // the order's
+            return $this->refuse($sku, $stockId, $requested, $ran, sprintf(
+                'a reservation names only the order number %s, which orders of several stores carry; inventory:order-reservation:settle %d closes the row once the stock is corrected by hand',
+                (string) $order->getIncrementId(),
+                $orderId
+            ));
+        }
         $remaining = $this->remaining->forOrderSku($order, $sku, $stockId, $obligation->productId)['remaining'];
         if (abs($remaining) < Obligation::TOLERANCE) {
             return new Outcome(Outcome::ALREADY_BALANCED, $sku, $stockId, $requested, 0.0, 0.0, $ran);
