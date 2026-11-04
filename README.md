@@ -1,6 +1,6 @@
 # Magento Inventory support for the order reservation module
 
-This package is the Magento Inventory (MSI) half of [`hyva-themes/magento2-inventory-order-reservation`](https://gitlab.hyva.io/hyva-pos/magento2-inventory-order-reservation). Install it on a store that runs MSI. Without it, the core module only knows how to deduct the legacy stock item.
+This package is the Magento Inventory (MSI) half of [`hyva-themes/magento2-inventory-order-reservation`](https://github.com/hyva-themes/magento2-inventory-order-reservation). Install it on a store that runs MSI. Without it, the core module only knows how to deduct the legacy stock item.
 
 The core module keeps a small table of what each API-created order still owes in stock, and makes sure that stock is written exactly once. This package does the actual writing on an MSI store: it places the `order_placed` reservation, and it teaches Magento's own repair commands about orders the core is still working on.
 
